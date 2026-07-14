@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "issue-*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fast lint pass: formatting + clippy (warnings are errors).
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets --release -- -D warnings
+
+  # Build + unit tests on the CPU (ndarray) backend.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release --all-targets
+      - name: test
+        run: cargo test --release
+
+  # Smoke train: a tiny CPU run that must (a) finish and (b) show the model
+  # actually places structure (placement recall rises above the collapse floor).
+  # This is the always-on guard for the "is it really learning?" requirement.
+  smoke-train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: tiny training run
+        run: |
+          cargo run --release --bin train -- \
+            --steps 200 --batch 16 --hidden 32 --blocks 4 \
+            --val-every 100 --val-batch 32 --out /tmp/ci-ckpt/denoiser \
+            | tee train.log
+      - name: reconstruct + score
+        run: |
+          cargo run --release --bin sample -- \
+            --ckpt /tmp/ci-ckpt/denoiser --show 2 --eval 128 \
+            | tee sample.log
