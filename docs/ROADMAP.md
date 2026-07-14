@@ -48,8 +48,21 @@ observed directly in early smoke runs (`functional` fell to 0 as the model
 collapsed).
 **Mitigation in place:** `structure_weight` (up-weight non-empty targets) +
 placement-recall metric to detect collapse.
-**Next:** tune `structure_weight`; try focal loss; try masking the *removable*
-cells preferentially during training so the belts are always the learning target.
+
+**Empirical check (CI smoke-train, 200 CPU steps, `structure_weight=8`):**
+```
+AGGREGATE: n=128 | exact=0.008 functional=0.258 (orig_fn=128)
+           consistent=0.805 | acc[entity=0.044 dir=0.110 item=1.000 misc=0.892]
+```
+`functional=0.258` (vs `0.0` at collapse) after only 200 steps confirms the fix
+escapes the empty attractor — the model builds real, partly-working structure.
+The low `entity` accuracy is the *opposite* symptom: at `structure_weight=8` the
+model now **over-places** structure (predicts belts on cells that should be
+empty), so it loses the empty-cell accuracy it used to farm for free. That is a
+much healthier failure than collapse and is a tuning target, not a wall.
+**Next:** sweep `structure_weight` down toward the true non-empty ratio; try
+focal loss; try masking the *removable* cells preferentially during training so
+the belts are always the learning target.
 
 ### 2. Simulator fidelity
 `item_reaches_sink` is a reachability check, not true lane-aware throughput. It
