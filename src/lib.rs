@@ -16,11 +16,13 @@
 //! * [`sample`] — inference / sampling & functional validation.
 
 pub mod backend;
+pub mod blueprint;
 pub mod data;
 pub mod diffusion;
 pub mod factory_gen;
 pub mod metrics;
 pub mod model;
+pub mod observability;
 pub mod persist;
 pub mod sample;
 pub mod sim;

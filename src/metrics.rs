@@ -6,6 +6,7 @@
 
 use crate::sim::item_reaches_sink;
 use crate::world::{Channel, Grid, N_CHANNELS};
+use serde::{Deserialize, Serialize};
 
 const CHANNELS: [Channel; N_CHANNELS] = [
     Channel::Entity,
@@ -15,7 +16,7 @@ const CHANNELS: [Channel; N_CHANNELS] = [
 ];
 
 /// Aggregated reconstruction metrics over a validation set.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ReconReport {
     pub n_factories: usize,
     /// Masked cells scored (denominator for per-channel accuracy).

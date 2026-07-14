@@ -44,6 +44,19 @@ impl Default for SampleConfig {
     }
 }
 
+/// A reconstruction plus spatial uncertainty captured when each generated cell
+/// was committed by the reverse-diffusion schedule.
+#[derive(Clone, Debug)]
+pub struct ReconstructionDiagnostics {
+    pub grid: Grid,
+    /// Mean probability assigned to the selected category across four heads.
+    pub confidence: Vec<f32>,
+    /// Mean normalized categorical entropy across four heads (`0..=1`).
+    pub entropy: Vec<f32>,
+    /// One-based reveal round; zero denotes an observed conditioning cell.
+    pub reveal_step: Vec<usize>,
+}
+
 /// A partial factory to be completed: which cells are given, and the ground-truth
 /// (only read at observed cells) plus obstacle conditioning.
 struct HostInputs {
@@ -72,6 +85,20 @@ pub fn reconstruct<B: Backend>(
     cfg: &SampleConfig,
     device: &B::Device,
 ) -> Vec<Grid> {
+    reconstruct_with_diagnostics(model, partials, observed, cfg, device)
+        .into_iter()
+        .map(|result| result.grid)
+        .collect()
+}
+
+/// Reconstruct factories and retain confidence, entropy and reveal-time maps.
+pub fn reconstruct_with_diagnostics<B: Backend>(
+    model: &Denoiser<B>,
+    partials: &[Grid],
+    observed: &[Vec<bool>],
+    cfg: &SampleConfig,
+    device: &B::Device,
+) -> Vec<ReconstructionDiagnostics> {
     assert_eq!(partials.len(), observed.len());
     if partials.is_empty() {
         return Vec::new();
@@ -90,6 +117,9 @@ pub fn reconstruct<B: Backend>(
     // Working state: observed cells keep their id; masked cells start at MASK.
     let mut cur = tokens.clone();
     let mut masked = vec![false; n * plane]; // per (sample, cell)
+    let mut confidence = vec![1.0f32; n * plane];
+    let mut entropy = vec![0.0f32; n * plane];
+    let mut reveal_step = vec![0usize; n * plane];
     for s in 0..n {
         for cell in 0..plane {
             let obs = observed[s * plane + cell];
@@ -131,21 +161,27 @@ pub fn reconstruct<B: Backend>(
                 .min(remaining);
 
             // Score every still-masked cell; pick the `reveal` most confident.
-            let mut scored: Vec<(f64, usize)> = Vec::with_capacity(remaining);
+            let mut scored: Vec<(CellPrediction, usize)> = Vec::with_capacity(remaining);
             for cell in 0..plane {
                 if !masked[s * plane + cell] {
                     continue;
                 }
-                let (score, _) = decode_cell(&probs, s, cell, n, plane, cfg, &mut rng);
-                scored.push((score, cell));
+                let prediction = decode_cell(&probs, s, cell, plane, cfg, &mut rng);
+                scored.push((prediction, cell));
             }
             // Highest score first.
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            for &(_, cell) in scored.iter().take(reveal) {
-                let (_, ids) = decode_cell(&probs, s, cell, n, plane, cfg, &mut rng);
+            scored.sort_by(|a, b| {
+                b.0.score
+                    .partial_cmp(&a.0.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (prediction, cell) in scored.into_iter().take(reveal) {
                 for c in 0..N_CHANNELS {
-                    cur[(s * N_CHANNELS + c) * plane + cell] = ids[c] as i32;
+                    cur[(s * N_CHANNELS + c) * plane + cell] = prediction.ids[c] as i32;
                 }
+                confidence[s * plane + cell] = prediction.confidence;
+                entropy[s * plane + cell] = prediction.entropy;
+                reveal_step[s * plane + cell] = step + 1;
                 masked[s * plane + cell] = false;
             }
         }
@@ -159,7 +195,12 @@ pub fn reconstruct<B: Backend>(
             let obs_flags: Vec<bool> = (0..plane)
                 .map(|cell| obstacle[s * plane + cell] > 0.5)
                 .collect();
-            grid_from_ids(ids, h, w, &obs_flags)
+            ReconstructionDiagnostics {
+                grid: grid_from_ids(ids, h, w, &obs_flags),
+                confidence: confidence[s * plane..(s + 1) * plane].to_vec(),
+                entropy: entropy[s * plane..(s + 1) * plane].to_vec(),
+                reveal_step: reveal_step[s * plane..(s + 1) * plane].to_vec(),
+            }
         })
         .collect()
 }
@@ -192,18 +233,26 @@ fn predict<B: Backend>(
 /// Decode a single cell: pick a category per channel (argmax or temperature
 /// sample) and return `(confidence_score, ids)`. The score is the summed log-prob
 /// of the chosen categories — how sure the model is about this whole cell.
+#[derive(Clone, Debug)]
+struct CellPrediction {
+    score: f64,
+    ids: [usize; N_CHANNELS],
+    confidence: f32,
+    entropy: f32,
+}
+
 fn decode_cell(
     probs: &[Vec<f32>],
     s: usize,
     cell: usize,
-    n: usize,
     plane: usize,
     cfg: &SampleConfig,
     rng: &mut ChaCha8Rng,
-) -> (f64, [usize; N_CHANNELS]) {
-    let _ = n;
+) -> CellPrediction {
     let mut ids = [0usize; N_CHANNELS];
     let mut score = 0.0f64;
+    let mut confidence = 0.0f64;
+    let mut entropy = 0.0f64;
     for c in 0..N_CHANNELS {
         let k = VOCAB[c];
         // probs[c] is [n, K, plane]; index (s, j, cell).
@@ -215,8 +264,22 @@ fn decode_cell(
         };
         ids[c] = chosen;
         score += (p(chosen).max(1e-9)).ln();
+        confidence += p(chosen);
+        let channel_entropy: f64 = (0..k)
+            .map(|j| {
+                let probability = p(j).max(1e-12);
+                -probability * probability.ln()
+            })
+            .sum::<f64>()
+            / (k as f64).ln();
+        entropy += channel_entropy;
     }
-    (score, ids)
+    CellPrediction {
+        score,
+        ids,
+        confidence: (confidence / N_CHANNELS as f64) as f32,
+        entropy: (entropy / N_CHANNELS as f64) as f32,
+    }
 }
 
 fn argmax_index(k: usize, p: &impl Fn(usize) -> f64) -> usize {
@@ -316,6 +379,44 @@ mod tests {
                 let (x, y) = (cell % 11, cell / 11);
                 assert_eq!(g.get(x, y), s.solution.get(x, y), "observed cell changed");
             }
+        }
+    }
+
+    #[test]
+    fn diagnostics_cover_every_cell_with_bounded_uncertainty() {
+        type B = CpuBackend;
+        let device = Default::default();
+        let sample = generate(LessonKind::MoveOneItem, 7, 9).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        let (partial, observed) = sample.blank(None, &mut rng);
+        let model = DenoiserConfig::new()
+            .with_hidden(8)
+            .with_blocks(1)
+            .init::<B>(&device);
+        let diagnostics = reconstruct_with_diagnostics(
+            &model,
+            &[partial],
+            std::slice::from_ref(&observed),
+            &SampleConfig {
+                steps: 3,
+                ..Default::default()
+            },
+            &device,
+        );
+        let diagnostics = &diagnostics[0];
+        assert_eq!(diagnostics.confidence.len(), 49);
+        assert_eq!(diagnostics.entropy.len(), 49);
+        assert_eq!(diagnostics.reveal_step.len(), 49);
+        assert!(diagnostics
+            .confidence
+            .iter()
+            .all(|&v| (0.0..=1.0).contains(&v)));
+        assert!(diagnostics
+            .entropy
+            .iter()
+            .all(|&v| (0.0..=1.000_001).contains(&v)));
+        for (i, &is_observed) in observed.iter().enumerate() {
+            assert_eq!(diagnostics.reveal_step[i] == 0, is_observed);
         }
     }
 }

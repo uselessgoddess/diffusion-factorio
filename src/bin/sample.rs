@@ -10,10 +10,12 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use diffusion_factorio::blueprint::{blueprint_string, grid_to_blueprint};
 use diffusion_factorio::factory_gen::{generate, LessonKind};
 use diffusion_factorio::metrics::reconstruction_report;
+use diffusion_factorio::observability::{write_sample_report, SampleReportEntry};
 use diffusion_factorio::persist;
-use diffusion_factorio::sample::{reconstruct, SampleConfig};
+use diffusion_factorio::sample::{reconstruct_with_diagnostics, SampleConfig};
 use diffusion_factorio::textual::render;
 use diffusion_factorio::world::Grid;
 use rand_chacha::rand_core::SeedableRng;
@@ -40,10 +42,17 @@ struct Args {
     steps: usize,
     #[arg(long, default_value_t = 0)]
     seed: u64,
+    /// Offline spatial confidence/entropy/error heatmap report.
+    #[arg(long, default_value = "sample-report.html")]
+    report: PathBuf,
+    /// Export the first reconstruction as an importable Factorio blueprint.
+    #[arg(long)]
+    blueprint_out: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    anyhow::ensure!(args.eval > 0, "--eval must be at least 1");
     let device = Default::default();
     let model = persist::load::<B>(&args.ckpt, &device)?;
     let cfg = SampleConfig {
@@ -72,7 +81,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let recon = reconstruct(&model, &partials, &observed, &cfg, &device);
+    let diagnostics = reconstruct_with_diagnostics(&model, &partials, &observed, &cfg, &device);
+    let recon: Vec<Grid> = diagnostics
+        .iter()
+        .map(|result| result.grid.clone())
+        .collect();
 
     for i in 0..args.show.min(recon.len()) {
         println!("=== example {i} [{}] ===", kinds[i].name());
@@ -83,5 +96,33 @@ fn main() -> anyhow::Result<()> {
 
     let report = reconstruction_report(&originals, &recon, &observed);
     println!("\nAGGREGATE: {report}");
+
+    let entries: Vec<SampleReportEntry<'_>> = (0..args.show.min(recon.len()))
+        .map(|i| SampleReportEntry {
+            label: kinds[i].name(),
+            input: &partials[i],
+            prediction: &diagnostics[i].grid,
+            target: &originals[i],
+            observed: &observed[i],
+            confidence: &diagnostics[i].confidence,
+            entropy: &diagnostics[i].entropy,
+            reveal_step: &diagnostics[i].reveal_step,
+        })
+        .collect();
+    write_sample_report(&args.report, &entries)?;
+    println!("saved spatial diagnostics to {}", args.report.display());
+
+    if let Some(path) = &args.blueprint_out {
+        let blueprint = grid_to_blueprint(&recon[0], "diffusion-factorio reconstruction")?;
+        let encoded = blueprint_string(&blueprint)?;
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, encoded)?;
+        println!("saved Factorio blueprint to {}", path.display());
+    }
     Ok(())
 }

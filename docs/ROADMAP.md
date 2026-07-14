@@ -24,6 +24,11 @@ now, what the known bottlenecks are (ranked), and the concrete next steps.
   `sample` binary reconstructs blanked factories and reports functional validity.
 - **Binaries** — `gen_data`, `train`, `sample`. ✅ build + run.
 - **CI** — build, clippy, fmt, unit tests, and a tiny CPU training smoke test.
+- **Frozen evaluation + observability** — deterministic held-out corpus,
+  per-step JSONL, offline curve report, per-lesson metrics, and spatial
+  confidence/entropy/error/reveal heatmaps.
+- **Factorio export** — vanilla entity/direction/recipe mapping and Factorio 2.x
+  compressed blueprint strings, including visible source/sink markers.
 
 ## The metrics that prove learning (watch these)
 
@@ -92,21 +97,21 @@ batch size; confirm parity of results between backends.
 
 ## Concrete next steps (in order)
 
-1. **Convergence study on GPU** — run `train --features wgpu` for ≥50k steps;
-   confirm `place` → high and `functional` → high on held-out lessons. Record a
-   curve in this file.
-2. **Tune the imbalance knobs** — sweep `structure_weight`, add focal loss,
-   compare mean-CE vs `--elbo`.
+1. **Independent/OOD evaluation** — freeze checked-in easy/medium/hard/OOD
+   corpora with manifests, hold out entire lesson families, and compare seeds.
+2. **Real footprints + Factorio parity** — represent 3×3 assemblers and 2×1
+   splitters honestly, then automate blueprint execution in real Factorio.
 3. **Lane-aware throughput** — port `graph.rs`/`throughput.rs`; switch the
-   headline metric from binary "reaches sink" to graded throughput.
-4. **Richer curriculum** — multi-tile assemblers, buses, branches; held-out
+   headline metric from binary "reaches sink" to graded throughput and verify it
+   against Factorio ticks.
+4. **Tune the imbalance knobs** — sweep `structure_weight`, add focal loss,
+   compare mean-CE vs `--elbo`.
+5. **Richer curriculum** — multi-tile assemblers, buses, branches; held-out
    kinds for generalization.
-5. **Multi-scale denoiser** — U-Net down/up path; measure large-grid gains.
-6. **RL fine-tuning (optional)** — once throughput is graded, add a PPO-style
-   pass on top of the diffusion prior (mirrors the reference's SFT→PPO, but with a
-   much stronger, conditional starting point).
-7. **Blueprint export** — map the grid back to a Factorio blueprint string for
-   real in-game validation (the ultimate "is it SOTA / usable" check).
+6. **Best-of-N throughput search** — score many diffusion candidates with the
+   fast verified simulator before introducing training instability.
+7. **RL/self-improvement (optional)** — only after graded throughput and real
+   Factorio parity prevent reward hacking.
 
 ## How to reproduce
 
@@ -122,4 +127,8 @@ cargo run --release --features wgpu --bin train -- --steps 50000 --out checkpoin
 
 # Validate: blank known factories and reconstruct
 cargo run --release --bin sample -- --ckpt checkpoints/denoiser --show 4 --eval 256
+
+# Inspect heatmaps and import the first reconstruction in Factorio
+cargo run --release --bin sample -- --ckpt checkpoints/denoiser \
+  --blueprint-out generated-blueprint.txt
 ```

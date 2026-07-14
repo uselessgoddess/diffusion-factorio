@@ -44,8 +44,8 @@ channel — avoiding the reference's footprint data leak.
 ## Is it really learning? (metrics)
 
 The issue's central requirement: it must always be *clear the model is really
-learning*. Every validation step blanks a set of known-good factories,
-reconstructs them, and reports:
+learning*. Every run builds one **frozen, seed-controlled validation corpus**;
+each validation step reconstructs those same known-good factories and reports:
 
 - **`place` — placement recall**: entity accuracy on masked *non-empty* cells.
   The honest signal, immune to the empty-cell majority. If loss drops but `place`
@@ -53,6 +53,14 @@ reconstructs them, and reports:
 - **`functional`**: fraction of *reconstructed* factories where the item still
   reaches a sink, checked by the simulator (`src/sim.rs`). The number that matters.
 - **`exact`**, **`consistent`**, and per-channel accuracy `[E, D, I, M]`.
+
+The console is no longer the only record. Training flushes one structured row
+per step to `runs/training-metrics.jsonl` and writes a self-contained offline
+`runs/training-report.html` with loss/per-head NLL, LR, throughput, placement,
+validation curves, per-lesson metrics, and an annotated parameter table.
+Sampling writes `sample-report.html` with confidence, normalized entropy, error,
+and reveal-round heatmaps. Confidence is captured when a cell is committed—not
+after feeding the completed answer back into the model.
 
 The single biggest bottleneck — **empty-cell dominance** (~95% of cells are
 empty) — is countered with a **structure-weighted loss** and surfaced by the
@@ -73,7 +81,18 @@ cargo run --release --features wgpu --bin train -- --steps 50000 --out checkpoin
 
 # Validatable inference: blank known factories, reconstruct, and score
 cargo run --release --bin sample -- --ckpt checkpoints/denoiser --show 4 --eval 256
+
+# Also export the first reconstruction to Factorio's import-string format
+cargo run --release --bin sample -- --ckpt checkpoints/denoiser \
+  --blueprint-out generated-blueprint.txt
 ```
+
+Open `sample-report.html` to inspect spatial uncertainty. To inspect the result
+in Factorio, copy `generated-blueprint.txt`, open the Blueprint Library (`B`),
+click **Import string**, and paste it. Abstract source/sink anchors appear as
+tagged constant combinators. See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)
+for metric interpretation and [`docs/FACTORIO_EXPORT.md`](docs/FACTORIO_EXPORT.md)
+for the mapping and current simulation-parity limits.
 
 ## Crate layout
 
@@ -88,6 +107,8 @@ cargo run --release --bin sample -- --ckpt checkpoints/denoiser --show 4 --eval 
 | `train.rs` | Explicit AdamW loop, LR schedule, periodic functional validation |
 | `sample.rs` | Confidence-based iterative decoding (inpainting) |
 | `metrics.rs` | `reconstruction_report` — the "is it learning?" scorer |
+| `observability.rs` | Durable JSONL, offline curve report, spatial heatmaps |
+| `blueprint.rs` | Grid → Factorio 2.x JSON and compressed blueprint string |
 | `persist.rs` | Checkpoint save/load (`CompactRecorder` + JSON config) |
 | `textual.rs` | ASCII rendering so every output is eyeballable |
 | `bin/` | `gen_data`, `train`, `sample` CLIs |
@@ -105,3 +126,5 @@ cargo run --release --bin sample -- --ckpt checkpoints/denoiser --show 4 --eval 
 - [`docs/ANALYSIS.md`](docs/ANALYSIS.md) — reference analysis: what to borrow, what to reject.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the masked-diffusion design in detail.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — bottlenecks (ranked) and next steps.
+- [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) — how to read curves and heatmaps.
+- [`docs/FACTORIO_EXPORT.md`](docs/FACTORIO_EXPORT.md) — in-game import and entity mapping.
