@@ -95,3 +95,32 @@ cells, procedurally-generated verified lessons, simulator-grounded metrics — a
 swap its generation paradigm for **masked discrete diffusion**, while fixing the
 data leak, the receptive-field limit, and the empty-cell imbalance up front so
 they don't resurface as the same "childhood diseases".
+
+## Follow-up analysis after the first GPU convergence run
+
+The reported 5,000-step run reaches `exact=0.988`, `functional=0.988`, and
+`consistent=0.996` over 256 procedural reconstructions. This is strong evidence
+that the model escaped empty collapse and learned the current four-family
+curriculum. It is not yet evidence that arbitrary Factorio factories are solved:
+train and evaluation still share procedural lesson families, and the binary
+reachability metric cannot distinguish low from high throughput.
+
+The current Factorion repository has also moved beyond the early architecture
+review. Its most useful newer patterns are held-out/per-task validation,
+per-head losses, visual prediction diagnostics, blueprint/mod/RCON integration,
+graded throughput rollouts, SFT-to-PPO initialization, a fast Rust throughput
+engine, and a real-Factorio parity harness.
+
+This project now borrows the parts that are prerequisites for trustworthy work:
+
+- frozen, balanced validation independent of the advancing training stream;
+- durable per-step and per-head telemetry with per-lesson splits;
+- confidence, entropy, error, and reveal-time spatial diagnostics;
+- a real Factorio 2.x blueprint-string round trip with visible source/sink
+  markers.
+
+The remaining order matters. First make multi-tile footprints honest and verify
+a graded throughput simulator against real Factorio. Then use the diffusion
+model's natural strength—parallel candidate generation—for best-of-N search and
+elite replay. PPO-style or reward-weighted diffusion fine-tuning only becomes a
+sound optimization target after parity prevents reward hacking.
