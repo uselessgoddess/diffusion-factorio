@@ -14,6 +14,9 @@ use burn::tensor::backend::AutodiffBackend;
 use rand::Rng;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::time::Instant;
 
 use crate::data::GridBatch;
 use crate::diffusion::{loss, DiffusionConfig};
@@ -65,8 +68,9 @@ impl Default for TrainConfig {
 
 /// One line of training telemetry (also returned so callers/tests can assert on
 /// learning progress without scraping stdout).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrainLog {
+    /// One-based optimizer step, matching the progress output.
     pub step: usize,
     pub lr: f64,
     pub loss: f64,
@@ -75,8 +79,20 @@ pub struct TrainLog {
     /// Entity placement recall (accuracy on masked non-empty cells) — the honest
     /// "is it learning to build?" signal, immune to the empty-cell majority.
     pub placement_acc: f64,
+    /// Mean sampled diffusion time (masking rate) for the batch.
+    pub t_mean: f64,
+    /// Unweighted negative log-likelihood on masked cells.
+    pub nll: f64,
+    pub channel_nll: [f64; 4],
+    /// Wall-clock seconds since this training run started.
+    pub elapsed_seconds: f64,
+    pub samples_seen: usize,
+    /// Average examples processed per second since the run started.
+    pub samples_per_second: f64,
     /// Validation report (only present on validation steps).
     pub val: Option<ReconReport>,
+    /// The same validation metrics split by frozen lesson family.
+    pub val_by_lesson: BTreeMap<String, ReconReport>,
 }
 
 /// Train a denoiser from scratch. Returns the model and the collected logs.
@@ -84,6 +100,22 @@ pub fn train<B: AutodiffBackend>(
     cfg: &TrainConfig,
     device: &B::Device,
 ) -> (Denoiser<B>, Vec<TrainLog>) {
+    train_with_observer(cfg, device, |_| {})
+}
+
+/// Train while delivering every telemetry record to `observer` immediately.
+///
+/// This lets the CLI durably append JSONL during long GPU runs; a killed run
+/// still retains every completed step instead of losing all metrics at exit.
+pub fn train_with_observer<B, F>(
+    cfg: &TrainConfig,
+    device: &B::Device,
+    mut observer: F,
+) -> (Denoiser<B>, Vec<TrainLog>)
+where
+    B: AutodiffBackend,
+    F: FnMut(&TrainLog),
+{
     let mut model = cfg.model.init::<B>(device);
     let mut optim = AdamWConfig::new()
         .with_grad_clipping(Some(GradientClippingConfig::Norm(cfg.grad_clip)))
@@ -92,6 +124,8 @@ pub fn train<B: AutodiffBackend>(
     let mut data_rng = ChaCha8Rng::seed_from_u64(cfg.seed ^ 0xA11CE);
     let mut seed_ctr: u64 = 0;
     let mut logs = Vec::new();
+    let validation = (cfg.val_every > 0).then(|| build_validation_set(cfg));
+    let started = Instant::now();
 
     for step in 0..cfg.steps {
         let (grids, observed) =
@@ -114,13 +148,22 @@ pub fn train<B: AutodiffBackend>(
         ];
 
         let is_val = cfg.val_every > 0 && (step + 1) % cfg.val_every == 0;
-        let val = if is_val {
-            Some(validate::<B>(&model, cfg, &mut seed_ctr, device))
+        let (val, val_by_lesson) = if is_val {
+            let (aggregate, by_lesson) = validate::<B>(
+                &model,
+                cfg,
+                validation.as_ref().expect("validation set initialized"),
+                device,
+            );
+            (Some(aggregate), by_lesson)
         } else {
-            None
+            (None, BTreeMap::new())
         };
 
         let placement_acc = stats.placement_acc();
+        let elapsed_seconds = started.elapsed().as_secs_f64();
+        let samples_seen = (step + 1) * cfg.batch_size;
+        let samples_per_second = samples_seen as f64 / elapsed_seconds.max(f64::EPSILON);
         if is_val || step == 0 {
             let mut line = format!(
                 "step {:>5}/{} | lr {:.2e} | loss {:.4} | place {:.2} | acc[E={:.2} D={:.2} I={:.2} M={:.2}]",
@@ -144,14 +187,23 @@ pub fn train<B: AutodiffBackend>(
             let _ = std::io::stdout().flush();
         }
 
-        logs.push(TrainLog {
-            step,
+        let log = TrainLog {
+            step: step + 1,
             lr,
             loss: loss_v,
             train_acc,
             placement_acc,
+            t_mean: stats.t_mean,
+            nll: stats.nll,
+            channel_nll: stats.channel_nll,
+            elapsed_seconds,
+            samples_seen,
+            samples_per_second,
             val,
-        });
+            val_by_lesson,
+        };
+        observer(&log);
+        logs.push(log);
     }
 
     (model, logs)
@@ -217,32 +269,94 @@ fn train_batch(
 
 /// Blank known factories, reconstruct them, and score. This is the
 /// always-available "is it really learning?" signal.
-fn validate<B: AutodiffBackend>(
-    model: &Denoiser<B>,
-    cfg: &TrainConfig,
-    seed_ctr: &mut u64,
-    device: &B::Device,
-) -> ReconReport {
-    // Use the inner (non-autodiff) backend for inference.
-    let inner = model.valid();
-    let mut rng = ChaCha8Rng::seed_from_u64(0x5EED_u64.wrapping_add(*seed_ctr));
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValidationSet {
+    originals: Vec<Grid>,
+    partials: Vec<Grid>,
+    observed: Vec<Vec<bool>>,
+    kinds: Vec<LessonKind>,
+}
+
+/// Build one held-out corpus per run. Its seeds never depend on how much
+/// training data has been consumed, so every checkpoint is compared on the
+/// exact same tasks.
+fn build_validation_set(cfg: &TrainConfig) -> ValidationSet {
+    let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed ^ 0x05EE_DF12_EDA7_A5E7);
+    let kinds = feasible_kinds(cfg.grid_size);
+    let mut seed_ctr = cfg.seed ^ 0x0DD0_0DD0_0DD0_0DD0;
     let mut originals = Vec::with_capacity(cfg.val_batch);
     let mut partials = Vec::with_capacity(cfg.val_batch);
     let mut observed = Vec::with_capacity(cfg.val_batch);
-    for _ in 0..cfg.val_batch {
-        let s = draw_sample(cfg.grid_size, &mut rng, seed_ctr);
-        let (partial, obs) = s.blank(None, &mut rng);
-        originals.push(s.solution);
+    let mut selected_kinds = Vec::with_capacity(cfg.val_batch);
+
+    for i in 0..cfg.val_batch {
+        let kind = kinds[i % kinds.len()];
+        let sample = loop {
+            let seed = seed_ctr;
+            seed_ctr = seed_ctr.wrapping_add(1);
+            if let Some(sample) = generate(kind, cfg.grid_size, seed) {
+                break sample;
+            }
+        };
+        let (partial, obs) = sample.blank(None, &mut rng);
+        originals.push(sample.solution);
         partials.push(partial);
         observed.push(obs);
+        selected_kinds.push(kind);
     }
+
+    ValidationSet {
+        originals,
+        partials,
+        observed,
+        kinds: selected_kinds,
+    }
+}
+
+fn validate<B: AutodiffBackend>(
+    model: &Denoiser<B>,
+    cfg: &TrainConfig,
+    validation: &ValidationSet,
+    device: &B::Device,
+) -> (ReconReport, BTreeMap<String, ReconReport>) {
+    // Use the inner (non-autodiff) backend for inference.
+    let inner = model.valid();
     let sample_cfg = SampleConfig {
         steps: cfg.sample_steps,
         temperature: 0.0,
         seed: 0,
     };
-    let recon = reconstruct(&inner, &partials, &observed, &sample_cfg, device);
-    reconstruction_report(&originals, &recon, &observed)
+    let recon = reconstruct(
+        &inner,
+        &validation.partials,
+        &validation.observed,
+        &sample_cfg,
+        device,
+    );
+    let aggregate = reconstruction_report(&validation.originals, &recon, &validation.observed);
+    let mut by_lesson = BTreeMap::new();
+    for &kind in feasible_kinds(cfg.grid_size).iter() {
+        let indexes: Vec<usize> = validation
+            .kinds
+            .iter()
+            .enumerate()
+            .filter_map(|(i, candidate)| (*candidate == kind).then_some(i))
+            .collect();
+        let originals: Vec<Grid> = indexes
+            .iter()
+            .map(|&i| validation.originals[i].clone())
+            .collect();
+        let reconstructed: Vec<Grid> = indexes.iter().map(|&i| recon[i].clone()).collect();
+        let observed: Vec<Vec<bool>> = indexes
+            .iter()
+            .map(|&i| validation.observed[i].clone())
+            .collect();
+        by_lesson.insert(
+            kind.name().to_owned(),
+            reconstruction_report(&originals, &reconstructed, &observed),
+        );
+    }
+    (aggregate, by_lesson)
 }
 
 #[cfg(test)]
@@ -269,5 +383,21 @@ mod tests {
         assert!(last.is_finite());
         // A few dozen steps should already move the loss down noticeably.
         assert!(last < first, "loss did not decrease: {first} -> {last}");
+    }
+
+    #[test]
+    fn validation_corpus_is_frozen_for_a_run() {
+        let cfg = TrainConfig {
+            val_batch: 12,
+            seed: 42,
+            ..Default::default()
+        };
+        assert_eq!(build_validation_set(&cfg), build_validation_set(&cfg));
+
+        let other = TrainConfig {
+            seed: 43,
+            ..cfg.clone()
+        };
+        assert_ne!(build_validation_set(&other), build_validation_set(&cfg));
     }
 }

@@ -58,6 +58,8 @@ pub struct StepStats {
     pub t_mean: f64,
     /// Mean per-cell NLL over masked cells (unweighted).
     pub nll: f64,
+    /// Mean unweighted NLL for each categorical channel.
+    pub channel_nll: [f64; N_CHANNELS],
 }
 
 impl StepStats {
@@ -185,12 +187,17 @@ pub fn loss<B: Backend>(
             stats.placement_correct = scalar(hit.mul(placement_mask.clone()).sum());
             stats.placement_total = scalar(placement_mask.sum());
         }
-        stats.nll += scalar(raw_nll.mul(mask.clone()).sum());
+        let channel_nll = scalar(raw_nll.mul(mask.clone()).sum());
+        stats.channel_nll[c] = channel_nll;
+        stats.nll += channel_nll;
     }
     stats.masked = scalar(n_masked.clone());
     stats.t_mean = scalar(masked.t.clone().mean());
     if stats.masked > 0.0 {
         stats.nll /= stats.masked;
+        for value in &mut stats.channel_nll {
+            *value /= stats.masked;
+        }
     }
 
     let d = (h * w) as f64;
