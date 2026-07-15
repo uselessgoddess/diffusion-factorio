@@ -50,9 +50,23 @@ each validation step reconstructs those same known-good factories and reports:
 - **`place` — placement recall**: entity accuracy on masked *non-empty* cells.
   The honest signal, immune to the empty-cell majority. If loss drops but `place`
   stays near 0, the model has collapsed to "predict empty".
-- **`functional`**: fraction of *reconstructed* factories where the item still
+- **`functional`**: fraction of *reconstructed* factories where the **right item**
   reaches a sink, checked by the simulator (`src/sim.rs`). The number that matters.
 - **`exact`**, **`consistent`**, and per-channel accuracy `[E, D, I, M]`.
+
+Each is reported in two modes, because the easy one flatters:
+
+- **inpaint** — fill the gaps in a given scaffold. Only 2–7 of 121 cells are
+  masked, so a good score here does not mean the model can design a factory.
+- **`SCRATCH`** — only the source and sink stay visible (~119 of 121 masked): the
+  model is told *"plates enter here, gears must arrive there"* and must decide
+  what to build and where. **Read `functional` here, not `exact`** — many layouts
+  work, so `exact` only rewards rediscovering the generator's own answer.
+
+A warning that applies to both: with `--val-batch 64`, a perfect `1.000` is
+statistically consistent with a true per-lesson rate of **83%**. The default is
+512 for that reason. [`docs/TRAINING_ANALYSIS.md`](docs/TRAINING_ANALYSIS.md)
+works through what the first converged GPU run does and does not prove.
 
 The console is no longer the only record. Training flushes one structured row
 per step to `runs/training-metrics.jsonl` and writes a self-contained offline
@@ -123,6 +137,8 @@ for the mapping and current simulation-parity limits.
 
 ## Documentation
 
+- [`docs/TRAINING_ANALYSIS.md`](docs/TRAINING_ANALYSIS.md) — what the first
+  converged GPU run does and does not prove, with re-derivable numbers.
 - [`docs/ANALYSIS.md`](docs/ANALYSIS.md) — reference analysis: what to borrow, what to reject.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the masked-diffusion design in detail.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — bottlenecks (ranked) and next steps.

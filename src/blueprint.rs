@@ -4,6 +4,14 @@
 //! Source and sink cells are abstract environment anchors, so they are rendered
 //! as constant-combinator markers carrying role/item tags. All placeable model
 //! entities map to their vanilla Factorio prototype names.
+//!
+//! Factorio itself tolerates a blueprint with no `icons` field (it derives the
+//! library thumbnail from the first entity), but the format's schema lists
+//! `icons` as required, so strict third-party validators such as
+//! <https://fbe.teoxoy.com/> reject an export that omits it. We always emit it:
+//! it is required for interop, and deriving it from the factory's own items
+//! gives a thumbnail that describes the blueprint instead of whichever marker
+//! happened to sort first.
 
 use std::io::Write;
 
@@ -28,9 +36,36 @@ pub struct BlueprintEnvelope {
 pub struct Blueprint {
     pub item: String,
     pub label: String,
+    /// Required by the blueprint schema; see the module header. Never empty.
+    pub icons: Vec<Icon>,
     pub entities: Vec<BlueprintEntity>,
     pub version: u64,
 }
+
+/// Blueprint thumbnail slot. Factorio allows at most [`MAX_ICONS`], indexed
+/// from 1.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Icon {
+    pub signal: SignalId,
+    pub index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SignalId {
+    /// `item` for every icon we emit. Factorio 2.x treats this as the default
+    /// and omits it on export, but it stays valid and keeps us unambiguous for
+    /// validators that still expect the 1.1-era explicit form.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+}
+
+/// Factorio renders at most four icons on a blueprint thumbnail.
+pub const MAX_ICONS: usize = 4;
+
+/// Fallback icon for a factory that names no items at all (e.g. a bare belt
+/// run with untyped source and sink).
+const FALLBACK_ICON: &str = "transport-belt";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlueprintEntity {
@@ -116,10 +151,59 @@ pub fn grid_to_blueprint(grid: &Grid, label: impl Into<String>) -> Result<Bluepr
         blueprint: Blueprint {
             item: "blueprint".to_owned(),
             label: label.into(),
+            icons: blueprint_icons(grid),
             entities,
             version: FACTORIO_2_VERSION,
         },
     })
+}
+
+/// Describe the factory with up to [`MAX_ICONS`] item icons.
+///
+/// Sinks come first so the thumbnail leads with what the factory *produces*,
+/// then sources for what it consumes. A factory whose items are all
+/// [`Item::None`] still needs a valid icon, hence [`FALLBACK_ICON`].
+pub fn blueprint_icons(grid: &Grid) -> Vec<Icon> {
+    let items_of = |role: Entity| -> Vec<&'static str> {
+        let mut found = Vec::new();
+        for y in 0..grid.height {
+            for x in 0..grid.width {
+                let cell = grid.get(x, y);
+                if cell.entity == role {
+                    if let Some(name) = item_name(cell.item) {
+                        found.push(name);
+                    }
+                }
+            }
+        }
+        found
+    };
+
+    let mut names: Vec<&'static str> = Vec::new();
+    for name in items_of(Entity::Sink)
+        .into_iter()
+        .chain(items_of(Entity::Source))
+    {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        names.push(FALLBACK_ICON);
+    }
+
+    names
+        .into_iter()
+        .take(MAX_ICONS)
+        .enumerate()
+        .map(|(i, name)| Icon {
+            signal: SignalId {
+                kind: "item".to_owned(),
+                name: name.to_owned(),
+            },
+            index: i + 1,
+        })
+        .collect()
 }
 
 /// Compact JSON accepted by Factorio 2.x and useful for debugging exporters.

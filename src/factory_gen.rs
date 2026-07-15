@@ -84,6 +84,36 @@ impl Sample {
         }
         (partial, observed)
     }
+
+    /// Blank everything except the environment anchors: the source and sink
+    /// tiles stay, every other cell is masked.
+    ///
+    /// [`Sample::blank`] only removes `removable` cells, so it always leaves the
+    /// scaffold visible — the model is told where the assembler goes and which
+    /// recipe it runs, and only fills a handful of gaps. That measures
+    /// *inpainting*, not design. Here the model is instead given only "plates
+    /// enter here, gears must arrive there" and has to decide what to build and
+    /// where, which is the task we actually care about.
+    ///
+    /// Obstacles live on a separate, non-generative plane and stay visible;
+    /// they are terrain, not something the model places. This mirrors the
+    /// reference's honest `thput_eot` metric, which blanks the whole grid and
+    /// rebuilds it from empty.
+    pub fn blank_to_scaffold(&self) -> (Grid, Vec<bool>) {
+        let mut partial = self.solution.clone();
+        let observed: Vec<bool> = self
+            .solution
+            .cells
+            .iter()
+            .map(|cell| matches!(cell.entity, Entity::Source | Entity::Sink))
+            .collect();
+        for (cell, &keep) in partial.cells.iter_mut().zip(&observed) {
+            if !keep {
+                *cell = Cell::default();
+            }
+        }
+        (partial, observed)
+    }
 }
 
 /// Generate a functional factory for `kind` on a `size`×`size` grid, retrying
@@ -272,14 +302,10 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     }
     let y = rng.gen_range(0..size);
     let x0 = rng.gen_range(0..=(size - 5));
-    let recipe = *[Item::IronGear, Item::CopperCable, Item::GreenCircuit]
-        .choose(rng)
-        .unwrap();
-    let input_item = match recipe {
-        Item::IronGear => Item::IronPlate,
-        Item::CopperCable => Item::CopperPlate,
-        _ => Item::IronPlate,
-    };
+    let recipe = *Item::craftable().choose(rng).unwrap();
+    let input_item = recipe
+        .ingredient()
+        .expect("every craftable recipe has an ingredient");
 
     let mut grid = Grid::new(size, size);
     grid.set(
@@ -460,5 +486,54 @@ mod tests {
             assert!(observed[i]);
             assert_eq!(partial.cells[i], s.solution.cells[i]);
         }
+    }
+
+    #[test]
+    fn blanking_to_scaffold_leaves_only_the_source_and_sink() {
+        for &kind in LessonKind::all() {
+            let Some(s) = generate(kind, 11, 7) else {
+                continue;
+            };
+            let (partial, observed) = s.blank_to_scaffold();
+            for (i, cell) in s.solution.cells.iter().enumerate() {
+                if matches!(cell.entity, Entity::Source | Entity::Sink) {
+                    assert!(observed[i], "{}: anchor was blanked", kind.name());
+                    assert_eq!(partial.cells[i], *cell);
+                } else {
+                    assert!(!observed[i], "{}: cell {i} stayed visible", kind.name());
+                    assert!(partial.cells[i].is_empty());
+                }
+            }
+            // Obstacles are terrain on a separate plane, not something the model
+            // places, so they survive blanking.
+            assert_eq!(partial.obstacle, s.solution.obstacle);
+        }
+    }
+
+    /// The gap between the two modes is the whole point: `blank` leaves the
+    /// scaffold up and asks for a handful of cells, so a model can score well on
+    /// it without ever having decided what to build.
+    #[test]
+    fn blanking_to_scaffold_asks_for_far_more_than_inpainting() {
+        let s = generate(LessonKind::AssemblerLine, 11, 7).expect("gen");
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let (_, inpaint) = s.blank(None, &mut rng);
+        let (_, scratch) = s.blank_to_scaffold();
+
+        let masked = |observed: &[bool]| observed.iter().filter(|&&o| !o).count();
+        assert!(
+            masked(&scratch) > 10 * masked(&inpaint),
+            "from scratch masked {} cells, inpainting masked {}",
+            masked(&scratch),
+            masked(&inpaint)
+        );
+        // The assembler and its recipe tag are gone too, so the only clue to what
+        // to craft is the item the sink accepts.
+        assert!(s
+            .solution
+            .cells
+            .iter()
+            .zip(&scratch)
+            .any(|(cell, &obs)| cell.entity == Entity::Assembler && !obs));
     }
 }

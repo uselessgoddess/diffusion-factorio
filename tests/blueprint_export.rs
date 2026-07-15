@@ -73,3 +73,122 @@ fn blueprint_string_is_factorio_zlib_json_format() {
     assert_eq!(value["blueprint"]["item"], "blueprint");
     assert_eq!(value["blueprint"]["label"], "round trip");
 }
+
+/// The blueprint schema requires `version`, `item` and `icons`. Factorio itself
+/// imports a blueprint without `icons`, so this only shows up when a strict
+/// validator (https://fbe.teoxoy.com/) rejects the export with
+/// `must have required property 'icons'`.
+#[test]
+fn export_carries_every_schema_required_property() {
+    let blueprint = grid_to_blueprint(&example_grid(), "schema").unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&blueprint_json(&blueprint).unwrap()).unwrap();
+    let bp = &value["blueprint"];
+
+    for required in ["version", "item", "icons"] {
+        assert!(
+            bp.get(required).is_some(),
+            "blueprint must have required property '{required}'"
+        );
+    }
+    assert!(
+        !bp["icons"].as_array().unwrap().is_empty(),
+        "an empty icons array is as invalid as a missing one"
+    );
+}
+
+#[test]
+fn icons_describe_the_factory_and_are_indexed_from_one() {
+    let blueprint = grid_to_blueprint(&example_grid(), "icons").unwrap();
+    let icons = &blueprint.blueprint.icons;
+
+    // Source and sink both carry IronPlate, so the icon list dedupes to one.
+    assert_eq!(icons.len(), 1);
+    assert_eq!(icons[0].signal.name, "iron-plate");
+    assert_eq!(icons[0].signal.kind, "item");
+    assert_eq!(icons[0].index, 1);
+}
+
+#[test]
+fn icons_lead_with_the_product_then_the_input() {
+    let mut grid = Grid::new(3, 1);
+    grid.set(
+        0,
+        0,
+        Cell {
+            entity: Entity::Source,
+            item: Item::CopperPlate,
+            ..Default::default()
+        },
+    );
+    grid.set(1, 0, Cell::belt(Direction::East));
+    grid.set(
+        2,
+        0,
+        Cell {
+            entity: Entity::Sink,
+            item: Item::CopperCable,
+            ..Default::default()
+        },
+    );
+
+    let blueprint = grid_to_blueprint(&grid, "product first").unwrap();
+    let names: Vec<&str> = blueprint
+        .blueprint
+        .icons
+        .iter()
+        .map(|i| i.signal.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["copper-cable", "copper-plate"]);
+    assert_eq!(blueprint.blueprint.icons[1].index, 2);
+}
+
+/// A factory can legitimately have no named items; the schema still demands a
+/// non-empty `icons`.
+#[test]
+fn untyped_factory_still_gets_a_valid_icon() {
+    let mut grid = Grid::new(2, 1);
+    grid.set(0, 0, Cell::belt(Direction::East));
+    grid.set(1, 0, Cell::belt(Direction::East));
+
+    let blueprint = grid_to_blueprint(&grid, "no items").unwrap();
+    assert_eq!(blueprint.blueprint.icons.len(), 1);
+    assert_eq!(blueprint.blueprint.icons[0].signal.name, "transport-belt");
+}
+
+/// Factorio renders at most four icons; a factory handling more items must not
+/// produce an over-long list.
+#[test]
+fn icons_are_capped_at_four() {
+    let mut grid = Grid::new(6, 2);
+    for (x, item) in [
+        Item::IronPlate,
+        Item::CopperPlate,
+        Item::IronGear,
+        Item::CopperCable,
+        Item::GreenCircuit,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        grid.set(
+            x,
+            0,
+            Cell {
+                entity: Entity::Sink,
+                item,
+                ..Default::default()
+            },
+        );
+    }
+
+    let icons = grid_to_blueprint(&grid, "many items")
+        .unwrap()
+        .blueprint
+        .icons;
+    assert_eq!(icons.len(), 4);
+    assert_eq!(
+        icons.iter().map(|i| i.index).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+}

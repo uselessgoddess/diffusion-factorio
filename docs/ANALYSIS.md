@@ -124,3 +124,65 @@ a graded throughput simulator against real Factorio. Then use the diffusion
 model's natural strength—parallel candidate generation—for best-of-N search and
 elite replay. PPO-style or reward-weighted diffusion fine-tuning only becomes a
 sound optimization target after parity prevents reward hacking.
+
+## Re-reading the reference at `fdb723a` (2026-07)
+
+A closer read against their current `main`, prompted by the 5,000-step run.
+Full write-up in [`TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md); the parts that
+change our plan:
+
+**Their docs disagree with their code.** `CLAUDE.md` is the only file that
+matches what the code does; `README.md` and `docs/EXPERIMENTS.md` are ~8 months
+stale and use a different normalization. Do not cite the 0.58–0.60 figure from
+`EXPERIMENTS.md`.
+
+**Where they actually are.** Canonical SFT base `j0s5y2mc` scores
+`val/thput_eot ≈ 0.11` — a greedy rollout that blanks the *whole* grid and
+rebuilds from empty. Per-lesson: `MOVE_ONE_ITEM ≈ 0.38`, **assembler lessons
+≈ 0**. With PPO, 45M samples and a full throughput engine, they cannot yet build
+a working assembler factory from scratch. That is the real bar, and it is lower
+than their README implies.
+
+**Newly worth borrowing:**
+
+- **Power-mean throughput** `((1/N)·Σ achievedᵢ^p)^(1/p)` at `p=0.5`
+  (`throughput.rs:7-17,39-45`) — punishes starving any one sink, which a plain
+  average does not. This is the single unlock: it makes the objective graded.
+- **1×1-conv tile head → softmax over the flat board** (`ppo.py:1243`). Their
+  PR #16: 2.6M → **520 parameters (~5000×)**, no throughput loss, **+76.4% SPS**
+  (p=4.7e-09). Nearly free.
+- **Per-tile conditioned attribute heads** `P(tile)·P(attrs|tile)` — directly
+  relevant to our joint-consistency problem.
+- **`thput_eot` metric discipline** — blank everything, rebuild from empty. We
+  have now adopted this as the `SCRATCH` validation pass.
+- **Lesson balancing on emitted (state, action) pairs**, not factories
+  (`sft.py:263-266`), because big factories emit ~10× more pairs. Relevant once
+  our lessons differ in size.
+
+**Newly rejected:**
+
+- **Their assembler throughput is wrong.** `entities.rs:426-451` never reads
+  `crafting_time` or `crafting_speed` and caps at `min_ratio ≤ 1.0` — a
+  pass-through ratio, not a 0.5-craft/s machine. Port the flow graph, not this.
+- **`thput_normed` needs the scripted reference solution** to normalize, so it
+  only exists for lessons they can already solve by construction — a live
+  `FIXME(#161)` at `ppo.py:654-665`. Our score should be absolute.
+- **Argmax-only inference** can loop on a tile; our confidence-ordered reveal is
+  better, and best-of-N better still.
+- **Potential-based reward shaping** — they tried it and rejected it (PR #18:
+  −2.8% throughput at p=0.560, i.e. not significant, for −18.3% SPS). If we ever
+  reach RL, reward stays terminal-only.
+
+**Already ours:** global mean+max pooled context (`ppo.py:1245-1258`, their #290)
+is in `src/model.rs`.
+
+**Convergent, which is reassuring:** their dataset is 100% procedural — nothing
+scraped, no human blueprints — streamed online (`StreamingDemoDataset`,
+`sft.py:323-350`, `num_samples = 45_000_000`, `epochs = 1`), validated by the
+throughput engine itself, with train/val disjoint by seed arithmetic
+(`sft.py:932-946`). Same principles we arrived at independently. The difference
+is **scale**: 45M samples versus our 160k.
+
+One caution against a plan we might otherwise adopt: they **explicitly reverted
+a held-out-recipe split** (#272) on the grounds that "memorising recipes is
+desired behaviour".

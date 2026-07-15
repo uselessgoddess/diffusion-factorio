@@ -38,13 +38,50 @@ Per training step we log, and validation aggregates:
   This is the honest signal; unlike raw entity accuracy it is *not* inflated by
   the empty-cell majority. If this is near 0 while loss drops, the model has
   collapsed to "predict empty".
-- **`functional`** — fraction of *reconstructed* factories where the item still
-  reaches a sink (simulator-grounded). The number that actually matters.
+- **`functional`** — fraction of *reconstructed* factories where the **right
+  item** still reaches a sink (simulator-grounded). The number that actually
+  matters.
 - **`exact`** — fraction reconstructed exactly on masked cells.
 - **`consistent`** — fraction of reconstructions that are well-formed cells.
 - Per-channel accuracy `[entity, dir, item, misc]`.
 
+Each is reported in **two modes**, and the difference is the point:
+
+- **inpaint** — fill the gaps in a given scaffold. Historical metric, kept for
+  comparability. Easy: 2–7 masked cells of 121.
+- **`SCRATCH`** — only the source and sink are visible (~119 of 121 masked), so
+  the model must decide *what to build and where*. **Read `functional` here, not
+  `exact`**: many layouts deliver the item, so `exact` only rewards
+  rediscovering the generator's own BFS answer. This is the first metric in the
+  project where the two genuinely come apart — under inpainting the data forces
+  them to agree.
+
 ## Bottlenecks, ranked
+
+### 0. The task is too small, and the eval could not tell us (the real one)
+Measured, not guessed — see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md)
+and `cargo run --release --example task_space`. The 5,000-step GPU run reached
+`exact=1.000 functional=1.000`, and that number is close to meaningless:
+
+- **`assembler_line` asks the model to fill 2.0 cells out of 121** (1.7% of the
+  grid), both always `Inserter, East`, from **231 distinct templates** seen ~173×
+  each. `underground_cross`: 110 templates, ~364× each. That is memorization
+  scale. (`move_one_item` and `..._chaos` are the honest half — ~42k and 200k+
+  distinct tasks, each seen ~once, so 1.000 there is real generalization.)
+- **`ambiguous tasks: 0` everywhere.** Each conditioning has exactly one valid
+  answer, so `functional == exact` is a property of the *data*, and a 30-line BFS
+  beats the model at the task as posed.
+- **`exact=1.000` came from n=64.** For an all-successes run the 95% lower bound
+  is `0.05^(1/n)`: 64/64 proves only >95.4%, and per-lesson 16/16 only >82.9%.
+  The fresh (held-out) training batches put the real entity error at **0.19%**
+  and show `place < 1.0` on **16.8% of batches** — a tail the frozen set is too
+  small to contain.
+
+**Mitigations in place:** from-scratch validation (`Sample::blank_to_scaffold`)
+masks everything but the source/sink, so the model must *design*, not inpaint;
+`val_batch` default 64 → 512; `functional` is now item-aware.
+**Next:** a curriculum where tasks admit *many* valid answers, which is the
+precondition for the model to beat BFS at all.
 
 ### 1. Empty-cell dominance (the big one)
 ~95% of cells are `Empty`. An unweighted loss collapses to predicting empty
@@ -69,12 +106,24 @@ much healthier failure than collapse and is a tuning target, not a wall.
 focal loss; try masking the *removable* cells preferentially during training so
 the belts are always the learning target.
 
-### 2. Simulator fidelity
-`item_reaches_sink` is a reachability check, not true lane-aware throughput. It
-can accept layouts Factorio would consider imperfect (e.g. it does not model belt
-capacity, sideloading, or splitter balancing).
-**Next:** port the reference's lane-aware flow graph (`graph.rs` + `throughput.rs`)
-to give a graded *normalized-throughput* metric and, later, an RL reward.
+### 2. Simulator fidelity — the metric cannot rank two working factories
+`item_reaches_sink` is a *binary* reachability check, not lane-aware throughput:
+it does not model belt capacity, sideloading, or splitter balancing, so it cannot
+say which of two working layouts is better.
+
+This is the blocker for almost everything downstream. Best-of-N has nothing to
+sort by; RL has no gradient to climb (the binary reward is already saturated at
+1.0). **Graded throughput is the unlock, and it should come before RL.**
+
+Fixed since the last run: `item_reaches_sink` was also **item-blind**, scoring
+"belt raw plate straight into a gear sink" as functional — i.e. rewarding
+*skipping* the assembler. It now carries the item through the BFS and applies
+recipes (the reference guards the same hole at `throughput.rs:205-226`).
+**Next:** port the reference's lane-aware flow graph (`graph.rs` +
+`throughput.rs`), scoring `((1/N)·Σ achievedᵢ^p)^(1/p)` at `p=0.5` so starving
+any one sink is punished. Note their assembler model is **wrong** — it never
+reads `crafting_time`/`crafting_speed` (`entities.rs:426-451`) — so port the
+structure, not that part.
 
 ### 3. Receptive field / global routing
 Addressed architecturally via the global-context vector, but for large grids a
@@ -89,29 +138,57 @@ Factorio layouts are richer (3×3 assemblers, multi-input recipes, buses).
 weight the curriculum by difficulty, and add held-out lesson kinds to measure
 generalization.
 
-### 5. Compute path (CPU vs GPU)
-CI trains on ndarray/CPU (slow, smoke-only, ~1 s/step). Real training needs the
-wgpu backend.
-**Next:** run `--features wgpu` on the 16 GB rx 9070 xt; profile step time and
-batch size; confirm parity of results between backends.
+### 5. Compute path — the GPU is idle, and the schedule wastes 40% of the run
+Not a wall, but free money. Profiled from the 5,000-step run's report:
+
+```
+total elapsed 140.5 s (2.3 min) | median train step 27.76 ms
+data generation 13,811-22,787 gen/s (~1.5-2.3 ms per batch of 32) = ~7% of step
+validation 2.1 s total = 1.5% of the run
+```
+
+- **Data generation is not the bottleneck** (~7%), so the streaming design is
+  fine and batch 32 simply underutilizes the GPU. Raise it.
+- **Metrics saturate at step ~3,000 but cosine decay runs to 5,000**, ending at
+  `lr 3.08e-11`. The last ~2,000 steps did not move the weights: **~40% of the
+  run was spent not learning.** The gradual curve is the LR tail, not difficulty.
+
+**Next:** raise batch size until the GPU saturates; match schedule length to
+where learning actually stops; confirm backend parity (ndarray vs wgpu).
 
 ## Concrete next steps (in order)
 
-1. **Independent/OOD evaluation** — freeze checked-in easy/medium/hard/OOD
-   corpora with manifests, hold out entire lesson families, and compare seeds.
-2. **Real footprints + Factorio parity** — represent 3×3 assemblers and 2×1
-   splitters honestly, then automate blueprint execution in real Factorio.
-3. **Lane-aware throughput** — port `graph.rs`/`throughput.rs`; switch the
-   headline metric from binary "reaches sink" to graded throughput and verify it
-   against Factorio ticks.
-4. **Tune the imbalance knobs** — sweep `structure_weight`, add focal loss,
+Reordered after the 5,000-step run —
+see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
+
+1. **From-scratch evaluation** ✅ *(this branch)* — mask everything but the
+   source/sink so the model designs instead of inpainting. Establishes the real
+   baseline. Expect `exact` to collapse and `functional` to become the number
+   that matters; the reference scores ~0.11 on the equivalent metric.
+2. **Lane-aware graded throughput** — port `graph.rs`/`throughput.rs` (power mean
+   at `p=0.5`). Everything below is blocked on this: it is what makes one working
+   factory rankable against another.
+3. **Best-of-N sampling, verified by the simulator** — the highest-leverage step
+   for *usable output*. Sample N layouts, simulate each, keep the best. The
+   sampler is already stochastic and conditional, so this needs **no retraining**
+   and converts "right 99.8% of the time" into "the exported blueprint works".
+   Pipeline: generate → verify → best-of-N → export.
+4. **Richer curriculum that admits many answers** — multi-source/multi-sink,
+   several recipes, tighter obstacle budgets, true 3×3 assemblers and 2×1
+   splitters. Until a task has more than one valid solution, the model cannot
+   demonstrate design and BFS remains the better tool.
+5. **Tune the imbalance knobs** — sweep `structure_weight`, add focal loss,
    compare mean-CE vs `--elbo`.
-5. **Richer curriculum** — multi-tile assemblers, buses, branches; held-out
-   kinds for generalization.
-6. **Best-of-N throughput search** — score many diffusion candidates with the
-   fast verified simulator before introducing training instability.
-7. **RL/self-improvement (optional)** — only after graded throughput and real
-   Factorio parity prevent reward hacking.
+6. **Cheap architecture wins from the reference** — 1×1-conv tile head → softmax
+   over the flat board (their PR #16: 2.6M → **520 params**, no throughput loss,
+   +76.4% SPS); per-tile conditioned attribute heads `P(tile)·P(attrs|tile)`.
+7. **Factorio parity** — RCON harness (1800 warmup / 3600 measure ticks at 32×)
+   to prove the simulator is not lying. Not CI-able; needs a licensed install.
+8. **RL/self-improvement (optional, last)** — only once throughput is graded and
+   parity-checked. Today the reward is binary and already saturated, so **there
+   is nothing for a policy gradient to climb**. Note the reference *tried*
+   potential-based shaping and rejected it (−2.8% thput at p=0.560, −18.3% SPS);
+   reward stays terminal-only.
 
 ## How to reproduce
 

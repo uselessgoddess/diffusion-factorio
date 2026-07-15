@@ -29,3 +29,13 @@ lto = "thin"
 
 [dev-dependencies]
 approx = "0.5"
+
+# Experiments backing the claims in docs/TRAINING_ANALYSIS.md. Kept runnable so
+# every number in that document can be re-derived rather than trusted.
+[[example]]
+name = "task_space"
+path = "experiments/task_space.rs"
+
+[[example]]
+name = "blueprint_schema"
+path = "experiments/blueprint_schema.rs"

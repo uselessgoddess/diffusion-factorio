@@ -39,6 +39,13 @@ pub struct TrainConfig {
     pub grad_clip: f32,
     /// Run validation (and log) every this many steps.
     pub val_every: usize,
+    /// Held-out factories per validation pass.
+    ///
+    /// This is the resolution of every headline number, and small values are
+    /// dishonest: for an all-successes run the 95% lower bound on the true rate
+    /// is `0.05^(1/n)`, so 64/64 perfect only proves >95.4%, and per-lesson
+    /// (n/4) 16/16 only proves >82.9%. Validation costs ~1.5% of a run's wall
+    /// clock, so buying resolution here is nearly free.
     pub val_batch: usize,
     /// Reverse-diffusion rounds used during validation.
     pub sample_steps: usize,
@@ -57,7 +64,7 @@ impl Default for TrainConfig {
             warmup: 100,
             grad_clip: 1.0,
             val_every: 100,
-            val_batch: 64,
+            val_batch: 512,
             sample_steps: 12,
             seed: 0,
             model: DenoiserConfig::new(),
@@ -93,6 +100,12 @@ pub struct TrainLog {
     pub val: Option<ReconReport>,
     /// The same validation metrics split by frozen lesson family.
     pub val_by_lesson: BTreeMap<String, ReconReport>,
+    /// Validation on the same factories with only the source/sink anchors left
+    /// visible, so the model must build rather than inpaint. `functional` is the
+    /// metric to read here: many layouts are valid, so `exact` understates it.
+    pub val_scratch: Option<ReconReport>,
+    /// The from-scratch metrics split by frozen lesson family.
+    pub val_scratch_by_lesson: BTreeMap<String, ReconReport>,
 }
 
 /// Train a denoiser from scratch. Returns the model and the collected logs.
@@ -148,16 +161,22 @@ where
         ];
 
         let is_val = cfg.val_every > 0 && (step + 1) % cfg.val_every == 0;
-        let (val, val_by_lesson) = if is_val {
-            let (aggregate, by_lesson) = validate::<B>(
+        let report = is_val.then(|| {
+            validate::<B>(
                 &model,
                 cfg,
                 validation.as_ref().expect("validation set initialized"),
                 device,
-            );
-            (Some(aggregate), by_lesson)
-        } else {
-            (None, BTreeMap::new())
+            )
+        });
+        let (val, val_by_lesson, val_scratch, val_scratch_by_lesson) = match report {
+            Some(r) => (
+                Some(r.inpaint),
+                r.inpaint_by_lesson,
+                Some(r.scratch),
+                r.scratch_by_lesson,
+            ),
+            None => (None, BTreeMap::new(), None, BTreeMap::new()),
         };
 
         let placement_acc = stats.placement_acc();
@@ -180,6 +199,12 @@ where
             if let Some(r) = &val {
                 line.push_str(&format!(" || VAL {r}"));
             }
+            // The from-scratch score is the one that says whether the model can
+            // build a factory rather than fill gaps in a given one, so it is
+            // worth the width in the log.
+            if let Some(r) = &val_scratch {
+                line.push_str(&format!(" || SCRATCH {r}"));
+            }
             println!("{line}");
             // Flush so progress is visible immediately even when stdout is
             // redirected to a file / pipe (block-buffered otherwise).
@@ -201,6 +226,8 @@ where
             samples_per_second,
             val,
             val_by_lesson,
+            val_scratch,
+            val_scratch_by_lesson,
         };
         observer(&log);
         logs.push(log);
@@ -274,6 +301,11 @@ struct ValidationSet {
     originals: Vec<Grid>,
     partials: Vec<Grid>,
     observed: Vec<Vec<bool>>,
+    /// The same factories with everything but the source/sink anchors blanked,
+    /// so the model has to build them rather than fill in a few gaps. See
+    /// [`Sample::blank_to_scaffold`].
+    scratch_partials: Vec<Grid>,
+    scratch_observed: Vec<Vec<bool>>,
     kinds: Vec<LessonKind>,
 }
 
@@ -287,6 +319,8 @@ fn build_validation_set(cfg: &TrainConfig) -> ValidationSet {
     let mut originals = Vec::with_capacity(cfg.val_batch);
     let mut partials = Vec::with_capacity(cfg.val_batch);
     let mut observed = Vec::with_capacity(cfg.val_batch);
+    let mut scratch_partials = Vec::with_capacity(cfg.val_batch);
+    let mut scratch_observed = Vec::with_capacity(cfg.val_batch);
     let mut selected_kinds = Vec::with_capacity(cfg.val_batch);
 
     for i in 0..cfg.val_batch {
@@ -299,9 +333,12 @@ fn build_validation_set(cfg: &TrainConfig) -> ValidationSet {
             }
         };
         let (partial, obs) = sample.blank(None, &mut rng);
+        let (scratch_partial, scratch_obs) = sample.blank_to_scaffold();
         originals.push(sample.solution);
         partials.push(partial);
         observed.push(obs);
+        scratch_partials.push(scratch_partial);
+        scratch_observed.push(scratch_obs);
         selected_kinds.push(kind);
     }
 
@@ -309,8 +346,20 @@ fn build_validation_set(cfg: &TrainConfig) -> ValidationSet {
         originals,
         partials,
         observed,
+        scratch_partials,
+        scratch_observed,
         kinds: selected_kinds,
     }
+}
+
+/// One validation pass in both modes.
+struct Validation {
+    /// Fill the gaps in a given scaffold (the historical metric).
+    inpaint: ReconReport,
+    inpaint_by_lesson: BTreeMap<String, ReconReport>,
+    /// Build the factory given only the source/sink anchors.
+    scratch: ReconReport,
+    scratch_by_lesson: BTreeMap<String, ReconReport>,
 }
 
 fn validate<B: AutodiffBackend>(
@@ -318,7 +367,7 @@ fn validate<B: AutodiffBackend>(
     cfg: &TrainConfig,
     validation: &ValidationSet,
     device: &B::Device,
-) -> (ReconReport, BTreeMap<String, ReconReport>) {
+) -> Validation {
     // Use the inner (non-autodiff) backend for inference.
     let inner = model.valid();
     let sample_cfg = SampleConfig {
@@ -326,37 +375,41 @@ fn validate<B: AutodiffBackend>(
         temperature: 0.0,
         seed: 0,
     };
-    let recon = reconstruct(
-        &inner,
-        &validation.partials,
-        &validation.observed,
-        &sample_cfg,
-        device,
-    );
-    let aggregate = reconstruction_report(&validation.originals, &recon, &validation.observed);
-    let mut by_lesson = BTreeMap::new();
-    for &kind in feasible_kinds(cfg.grid_size).iter() {
-        let indexes: Vec<usize> = validation
-            .kinds
-            .iter()
-            .enumerate()
-            .filter_map(|(i, candidate)| (*candidate == kind).then_some(i))
-            .collect();
-        let originals: Vec<Grid> = indexes
-            .iter()
-            .map(|&i| validation.originals[i].clone())
-            .collect();
-        let reconstructed: Vec<Grid> = indexes.iter().map(|&i| recon[i].clone()).collect();
-        let observed: Vec<Vec<bool>> = indexes
-            .iter()
-            .map(|&i| validation.observed[i].clone())
-            .collect();
-        by_lesson.insert(
-            kind.name().to_owned(),
-            reconstruction_report(&originals, &reconstructed, &observed),
-        );
+
+    let run = |partials: &[Grid], observed: &[Vec<bool>]| {
+        let recon = reconstruct(&inner, partials, observed, &sample_cfg, device);
+        let aggregate = reconstruction_report(&validation.originals, &recon, observed);
+        let mut by_lesson = BTreeMap::new();
+        for &kind in feasible_kinds(cfg.grid_size).iter() {
+            let indexes: Vec<usize> = validation
+                .kinds
+                .iter()
+                .enumerate()
+                .filter_map(|(i, candidate)| (*candidate == kind).then_some(i))
+                .collect();
+            let originals: Vec<Grid> = indexes
+                .iter()
+                .map(|&i| validation.originals[i].clone())
+                .collect();
+            let reconstructed: Vec<Grid> = indexes.iter().map(|&i| recon[i].clone()).collect();
+            let obs: Vec<Vec<bool>> = indexes.iter().map(|&i| observed[i].clone()).collect();
+            by_lesson.insert(
+                kind.name().to_owned(),
+                reconstruction_report(&originals, &reconstructed, &obs),
+            );
+        }
+        (aggregate, by_lesson)
+    };
+
+    let (inpaint, inpaint_by_lesson) = run(&validation.partials, &validation.observed);
+    let (scratch, scratch_by_lesson) =
+        run(&validation.scratch_partials, &validation.scratch_observed);
+    Validation {
+        inpaint,
+        inpaint_by_lesson,
+        scratch,
+        scratch_by_lesson,
     }
-    (aggregate, by_lesson)
 }
 
 #[cfg(test)]

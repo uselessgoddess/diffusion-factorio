@@ -4,6 +4,7 @@ use diffusion_factorio::observability::{
 };
 use diffusion_factorio::train::TrainLog;
 use diffusion_factorio::world::{Cell, Direction, Grid};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -31,6 +32,8 @@ fn example_logs() -> Vec<TrainLog> {
             samples_per_second: 128.0,
             val: None,
             val_by_lesson: Default::default(),
+            val_scratch: None,
+            val_scratch_by_lesson: Default::default(),
         },
         TrainLog {
             step: 200,
@@ -54,6 +57,29 @@ fn example_logs() -> Vec<TrainLog> {
                 original_functional: 64,
             }),
             val_by_lesson: Default::default(),
+            // From scratch the whole factory is masked, so far more cells are
+            // scored and far fewer runs deliver the item.
+            val_scratch: Some(ReconReport {
+                n_factories: 64,
+                masked_cells: 7000,
+                channel_correct: [6300, 6100, 6900, 6800],
+                exact: 1,
+                consistent: 30,
+                functional: 5,
+                original_functional: 64,
+            }),
+            val_scratch_by_lesson: BTreeMap::from([(
+                "move_one_item".to_owned(),
+                ReconReport {
+                    n_factories: 16,
+                    masked_cells: 1800,
+                    channel_correct: [1700, 1650, 1790, 1780],
+                    exact: 1,
+                    consistent: 9,
+                    functional: 4,
+                    original_functional: 16,
+                },
+            )]),
         },
     ]
 }
@@ -73,6 +99,33 @@ fn metrics_jsonl_is_structured_and_keeps_validation() {
     assert_eq!(rows[1]["samples_seen"], 6400);
     assert_eq!(rows[1]["val"]["functional_rate"], 21.0 / 64.0);
     assert_eq!(rows[1]["val"]["entity_acc"], 0.9);
+    fs::remove_file(path).ok();
+}
+
+/// The from-scratch pass is the one that answers "can it design a factory?", so
+/// it has to reach the durable metrics rather than only the progress line.
+#[test]
+fn metrics_jsonl_keeps_the_from_scratch_pass_separate_from_inpainting() {
+    let path = temp_file("metrics-scratch.jsonl");
+    write_metrics_jsonl(&path, &example_logs()).unwrap();
+    let rows: Vec<serde_json::Value> = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    assert!(rows[0]["val_scratch"].is_null(), "no validation on step 1");
+    assert_eq!(rows[1]["val_scratch"]["functional_rate"], 5.0 / 64.0);
+    assert_eq!(
+        rows[1]["val_scratch_by_lesson"]["move_one_item"]["functional_rate"],
+        4.0 / 16.0
+    );
+    // Same factories, same n: only the conditioning differs, and building the
+    // whole factory is strictly harder than filling its gaps.
+    assert_eq!(rows[1]["val_scratch"]["n"], rows[1]["val"]["n"]);
+    assert!(
+        rows[1]["val_scratch"]["masked_cells"].as_u64() > rows[1]["val"]["masked_cells"].as_u64()
+    );
     fs::remove_file(path).ok();
 }
 
@@ -104,6 +157,7 @@ fn html_report_embeds_parameters_and_metric_charts() {
     assert!(html.contains("Training report"));
     assert!(html.contains("structure_weight"));
     assert!(html.contains("Functional / exact / consistent"));
+    assert!(html.contains("Built from scratch"));
     assert!(html.contains("Placement recall"));
     assert!(html.contains("per-channel NLL"));
     assert!(html.contains("application/json"));

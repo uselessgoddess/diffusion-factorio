@@ -147,6 +147,28 @@ impl Item {
             _ => return None,
         })
     }
+
+    /// The ingredient an assembler must be fed to craft this item, or `None`
+    /// for a raw item that no recipe produces.
+    ///
+    /// Single-ingredient simplification of the vanilla recipes (real green
+    /// circuits also need copper cable); it mirrors the 1×1 assembler we use in
+    /// place of the reference's 3×3. This is the one place the recipe graph is
+    /// defined — both the lesson generator and the simulator read it, so a
+    /// factory can never be generated that the simulator would call broken.
+    pub fn ingredient(self) -> Option<Self> {
+        Some(match self {
+            Self::IronGear => Self::IronPlate,
+            Self::CopperCable => Self::CopperPlate,
+            Self::GreenCircuit => Self::IronPlate,
+            Self::None | Self::IronPlate | Self::CopperPlate => return None,
+        })
+    }
+
+    /// Items an assembler can be given as a recipe.
+    pub fn craftable() -> [Self; 3] {
+        [Self::IronGear, Self::CopperCable, Self::GreenCircuit]
+    }
 }
 
 /// Misc per-cell state. Currently the underground-belt endpoint tag, mirroring
