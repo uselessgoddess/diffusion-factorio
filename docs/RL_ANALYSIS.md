@@ -55,9 +55,11 @@ that was the fix working.
 VAL n=512 | exact=0.992 functional=0.992
 ```
 
-These two never separate under `VAL` because **each conditioning has exactly one
-valid answer**, so "got it right" and "got it working" are the same event. That
-is measurable without a model:
+Across all 25 checkpoints of that run the `VAL` gap peaks at **0.023**, averages
+**0.0024**, and is *exactly* `0.000` at 19 of 25 — including **every single
+checkpoint from step 2,000 onward**. "Got it right" and "got it working" are the
+same event, because **each conditioning has exactly one valid answer**. That is
+measurable without a model at all:
 
 ```bash
 cargo run --release --example task_space
@@ -71,6 +73,13 @@ UNDERGROUND_CROSS      distinct factories:    110 | distinct tasks:    110 | amb
 
 `distinct tasks == distinct factories` in every family: the generator never shows
 two answers to one question. A 30-line BFS beats the model at the task as posed.
+
+The six small nonzero gaps are all *early* (steps 200–1600) and they are the same
+phenomenon as §1.3: `ambiguous tasks: 0` says the **generator's label** is unique,
+not that only one layout can work. A young model sometimes builds a working
+alternative the generator never emits; training closes that to exactly zero and
+keeps it there for the last 2,600 steps. Under `VAL` there is barely room for it
+anyway — `assembler_line` blanks 2 cells out of 121.
 
 Two of those families are also just *small*: `assembler_line` has 231 distinct
 tasks seen ~173× each in a 5k run, `underground_cross` 110 seen ~364×. That is

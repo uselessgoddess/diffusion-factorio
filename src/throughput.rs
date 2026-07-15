@@ -602,12 +602,7 @@ mod tests {
     /// ever fails, one of the two simulators is wrong about the same grid.
     #[test]
     fn every_generated_solution_scores_above_zero() {
-        for kind in [
-            LessonKind::MoveOneItem,
-            LessonKind::MoveOneItemChaos,
-            LessonKind::AssemblerLine,
-            LessonKind::UndergroundCross,
-        ] {
+        for &kind in LessonKind::all() {
             for seed in 0..200u64 {
                 let Some(sample) = factory_gen::generate(kind, 11, seed) else {
                     continue;
