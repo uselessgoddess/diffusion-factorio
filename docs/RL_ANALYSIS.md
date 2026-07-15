@@ -26,11 +26,13 @@ This branch fixes both, in exactly the order #7 asks for: graded throughput →
 Best-of-N verified by the simulator → a curriculum that admits many answers.
 
 **RL is not next.** Its three preconditions are now met — that is *necessary*,
-not *sufficient*. Best-of-N buys the same thing RL buys for zero training cost
-and hasn't been spent; one ambiguous family out of five is a base thin enough
-that RL would just memorize "build 3 lines"; and an unverified simulator is a
-reward function RL will *exploit* rather than satisfy. When it happens, the first
-form should be **expert iteration, not PPO**.
+not *sufficient*. The reference already ran this experiment: **PPO, 45M samples,
+a full throughput engine — and ≈ 0 on assembler lessons**. It did not deliver.
+Meanwhile Best-of-N buys the same thing RL buys for zero training cost and hasn't
+been spent; one ambiguous family out of five is a base thin enough that RL would
+just memorize "build 3 lines"; and an unverified simulator is a reward function
+RL will *exploit* rather than satisfy. When it happens, the first form should be
+**expert iteration, not PPO**.
 
 ---
 
@@ -261,11 +263,27 @@ mostly *not* worth copying wholesale; the long-form comparison is in
   SPS), and per-tile conditioned attribute heads `P(tile)·P(attrs|tile)`. Cheap,
   and orthogonal to everything above.
 
-The headline context: the reference scores **~0.11** on the metric equivalent to
-our `SCRATCH functional`. We are at **0.717**. Different world models, so this is
-not a leaderboard — but it does mean the from-scratch task is not what is holding
-us back, and it is another reason the next lever is the *curriculum*, not the
-model.
+**The most useful thing in that repo is a negative result, and it is about RL.**
+Their canonical SFT base scores `val/thput_eot ≈ 0.11`, and per-lesson:
+`MOVE_ONE_ITEM ≈ 0.38`, **assembler lessons ≈ 0**. With PPO, 45M samples and a
+full throughput engine, *they cannot build a working assembler factory from
+scratch at all*.
+
+That is worth sitting with before reaching for RL. The reference already ran the
+experiment #7 proposes — SOTA-ish RL, real reward, two orders of magnitude more
+samples than we have spent — and it did not produce assembler factories. Whatever
+is blocking that, a policy gradient did not fix it. This is the single strongest
+argument that the next lever is the **task**, not the training algorithm.
+
+**A comparison not to make:** their `0.11` against our `SCRATCH functional=0.717`.
+`thput_eot` is a *graded throughput* score; `functional` is *binary* — does it
+work, yes or no. Those measure different things, and reading 0.717 as "6× the
+reference" would be nonsense. The genuinely comparable number is our new
+`SCRATCH ratio` (delivered ÷ the reference answer's rate), which is why that
+metric now exists (§3.4). Even then the world models differ (1×1 entities, no
+lanes), so it is a sanity check, not a leaderboard. What *is* directly comparable
+is the **discipline**: blank everything, rebuild from empty. We adopted that from
+them.
 
 ---
 
@@ -273,8 +291,14 @@ model.
 
 The roadmap gated RL on three things and **all three are now green**: throughput
 is graded (§3.1), the sampler can be ranked (§3.2), and at least one family
-admits many answers (§3.3). That is necessary, not sufficient. Three reasons to
-still not do it next:
+admits many answers (§3.3). That is necessary, not sufficient.
+
+**Start from the reference's result (§4): PPO + 45M samples + a full throughput
+engine ≈ 0 on assembler lessons.** The experiment has been run, at a scale we are
+nowhere near, and RL did not deliver the thing we want. That is not proof it
+cannot — but it does mean "add RL" is not a plan, and it shifts the burden onto
+identifying what actually blocks assembler factories first. Then three concrete
+reasons to not do it *next*:
 
 1. **Best-of-N has not been spent.** It buys the same thing RL buys — higher
    delivered throughput — at zero training cost and zero risk of collapse.
