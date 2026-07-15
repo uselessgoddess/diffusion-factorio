@@ -116,7 +116,7 @@ fn resolve(grid: &Grid, from: (usize, usize), tiles: Vec<(usize, usize)>) -> Vec
 /// A source feeds any orthogonally adjacent belt; flow then follows belt
 /// directions until it reaches (points into) a sink or dead-ends. The carried
 /// item travels with the flow: belts pass it through unchanged, an assembler
-/// consumes its recipe's ingredient and emits the product, and a sink only
+/// consumes its recipe's ingredients and emits the product, and a sink only
 /// accepts the item it is configured for.
 ///
 /// Tracking the item is what stops the check rewarding a factory that merely
@@ -124,6 +124,14 @@ fn resolve(grid: &Grid, from: (usize, usize), tiles: Vec<(usize, usize)>) -> Vec
 /// a gear sink scores the same as building the gear assembler — the reference
 /// guards the same hole in `factorion_rs/src/throughput.rs:205-226`, where
 /// sinks only score their configured item.
+///
+/// This is a fixpoint over *sets*, not a walk carrying one item, and it has to
+/// be. An electronic circuit needs an iron plate **and** copper cable, so
+/// whether its machine runs is a fact about everything that has ever arrived
+/// there — not about the item currently in hand. A walk reaches the machine
+/// holding iron, asks "can I craft?", and cannot answer, because the cable's
+/// arrival is a different branch of the same search. Arriving-item sets only
+/// grow, so iterating to a fixpoint terminates.
 pub fn item_reaches_sink(grid: &Grid) -> bool {
     let sources = positions(grid, Entity::Source);
     let sinks = positions(grid, Entity::Sink);
@@ -131,51 +139,61 @@ pub fn item_reaches_sink(grid: &Grid) -> bool {
         return false;
     }
 
-    // State is (cell, carried item): the same tile can legitimately be reached
-    // carrying different items, and only some of them satisfy the sink.
-    let mut visited = vec![[false; Item::COUNT]; grid.len()];
-    let mut queue: VecDeque<((usize, usize), Item)> = VecDeque::new();
+    // `arriving[cell]` = every item that can be delivered into that cell.
+    let mut arriving = vec![[false; Item::COUNT]; grid.len()];
+    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
 
-    // Seed: whatever a source offers to is an entry point, and it starts out
-    // carrying that source's item.
+    // Seed: whatever a source offers to is an entry point, and what shows up
+    // there is that source's item.
     for &(sx, sy) in &sources {
         let carried = grid.get(sx, sy).item;
         for (nx, ny) in flow_targets(grid, sx, sy) {
             if is_conveyor(grid, nx, ny) {
-                push(grid, &mut visited, &mut queue, (nx, ny), carried);
+                deliver(grid, &mut arriving, &mut queue, (nx, ny), carried);
             }
         }
     }
 
-    while let Some(((x, y), carried)) = queue.pop_front() {
-        // An assembler transforms what passes through it: it only runs if fed
-        // its ingredient, and what leaves is the product.
-        let carried = match transform(grid, x, y, carried) {
-            Some(item) => item,
-            None => continue, // wrong ingredient: the machine never crafts
-        };
-
-        for (tx, ty) in flow_targets(grid, x, y) {
-            if sinks.contains(&(tx, ty)) && sink_accepts(grid.get(tx, ty).item, carried) {
-                return true;
-            }
-            if is_conveyor(grid, tx, ty) {
-                push(grid, &mut visited, &mut queue, (tx, ty), carried);
+    while let Some((x, y)) = queue.pop_front() {
+        // What this cell can hand on, given everything that has reached it.
+        let offered = emits(grid, &arriving[grid.idx(x, y)], x, y);
+        for carried in offered {
+            for (tx, ty) in flow_targets(grid, x, y) {
+                if sinks.contains(&(tx, ty)) && sink_accepts(grid.get(tx, ty).item, carried) {
+                    return true;
+                }
+                if is_conveyor(grid, tx, ty) {
+                    deliver(grid, &mut arriving, &mut queue, (tx, ty), carried);
+                }
             }
         }
     }
     false
 }
 
-/// What leaves a cell given what entered it. `None` means the flow stops here.
-fn transform(grid: &Grid, x: usize, y: usize, carried: Item) -> Option<Item> {
+/// What a cell offers onward, given everything that has arrived at it.
+///
+/// A conveyor passes on whatever it was handed. An assembler is the interesting
+/// case: it emits its product, and only its product, and only once **every**
+/// ingredient has turned up.
+fn emits(grid: &Grid, arriving: &[bool; Item::COUNT], x: usize, y: usize) -> Vec<Item> {
     let cell = grid.get(x, y);
     if cell.entity != Entity::Assembler {
-        return Some(carried);
+        return (0..Item::COUNT)
+            .filter(|&i| arriving[i])
+            .filter_map(Item::from_id)
+            .collect();
     }
     // An untagged assembler has no recipe, so it crafts nothing.
-    let ingredient = cell.item.ingredient()?;
-    (ingredient == carried).then_some(cell.item)
+    let Some(recipe) = cell.item.recipe() else {
+        return Vec::new();
+    };
+    let fed = recipe.ingredients.iter().all(|i| arriving[i.item as usize]);
+    if fed {
+        vec![cell.item]
+    } else {
+        Vec::new()
+    }
 }
 
 /// An untagged sink has no filter and accepts anything; a tagged one accepts
@@ -184,17 +202,23 @@ pub(crate) fn sink_accepts(filter: Item, carried: Item) -> bool {
     filter == Item::None || filter == carried
 }
 
-fn push(
+/// Record that `carried` reaches `(x, y)`, and re-wake the cell if that is news.
+///
+/// Re-queueing on *any* new arrival is what makes the fixpoint a fixpoint: an
+/// assembler visited while only iron had arrived emitted nothing, and must be
+/// asked again once the cable turns up. Each cell can only be woken
+/// [`Item::COUNT`] times, because the flags never go back to `false`.
+fn deliver(
     grid: &Grid,
-    visited: &mut [[bool; Item::COUNT]],
-    queue: &mut VecDeque<((usize, usize), Item)>,
+    arriving: &mut [[bool; Item::COUNT]],
+    queue: &mut VecDeque<(usize, usize)>,
     (x, y): (usize, usize),
     carried: Item,
 ) {
-    let seen = &mut visited[grid.idx(x, y)][carried as usize];
+    let seen = &mut arriving[grid.idx(x, y)][carried as usize];
     if !*seen {
         *seen = true;
-        queue.push_back(((x, y), carried));
+        queue.push_back((x, y));
     }
 }
 

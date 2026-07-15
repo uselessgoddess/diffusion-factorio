@@ -252,12 +252,7 @@ fn feasible_kinds(size: usize) -> Vec<LessonKind> {
     LessonKind::all()
         .iter()
         .copied()
-        .filter(|k| match k {
-            LessonKind::MoveOneItem | LessonKind::MoveOneItemChaos => size >= 3,
-            LessonKind::AssemblerLine => size >= 5,
-            LessonKind::UndergroundCross => size >= 7,
-            LessonKind::AssemblerBank => size >= 5,
-        })
+        .filter(|k| size >= k.min_size())
         .collect()
 }
 

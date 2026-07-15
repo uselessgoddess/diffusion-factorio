@@ -32,9 +32,13 @@ pub enum LessonKind {
     /// Exercises misc (underground tags).
     UndergroundCross,
     /// Up to [`BANK_LINES`] parallel assembler lines feeding one shared sink.
-    /// The only family with **many** valid answers, and they are not equally
-    /// good — see [`gen_assembler_bank`].
+    /// Has **many** valid answers, and they are not equally good — see
+    /// [`gen_assembler_bank`].
     AssemblerBank,
+    /// Copper plate → cable → circuit ← iron plate. The only chain, the only
+    /// two-input craft, and the only family whose best answer is *unbalanced* —
+    /// see [`gen_circuit_line`].
+    CircuitLine,
 }
 
 impl LessonKind {
@@ -45,6 +49,7 @@ impl LessonKind {
             LessonKind::AssemblerLine,
             LessonKind::UndergroundCross,
             LessonKind::AssemblerBank,
+            LessonKind::CircuitLine,
         ]
     }
     pub fn name(self) -> &'static str {
@@ -54,6 +59,25 @@ impl LessonKind {
             LessonKind::AssemblerLine => "ASSEMBLER_LINE",
             LessonKind::UndergroundCross => "UNDERGROUND_CROSS",
             LessonKind::AssemblerBank => "ASSEMBLER_BANK",
+            LessonKind::CircuitLine => "CIRCUIT_LINE",
+        }
+    }
+
+    /// The smallest square grid this family fits on.
+    ///
+    /// Each generator already refuses a grid it cannot fit, so this is not what
+    /// makes the curriculum correct — it is what keeps a caller from asking for
+    /// a lesson that can never be built and burning [`generate`]'s whole retry
+    /// budget discovering it. It lives here because the dimensions do; asked
+    /// from `train.rs` it was a guess, and a wrong one (an assembler line is
+    /// [`LINE_W`] columns wide, and was listed as needing five).
+    pub fn min_size(self) -> usize {
+        match self {
+            LessonKind::MoveOneItem | LessonKind::MoveOneItemChaos => 3,
+            LessonKind::AssemblerLine => LINE_W,
+            LessonKind::UndergroundCross => 7,
+            LessonKind::AssemblerBank => LINE_W.max(LINE_H * BANK_LINES),
+            LessonKind::CircuitLine => CIRCUIT_W.max(CIRCUIT_H),
         }
     }
 
@@ -67,7 +91,7 @@ impl LessonKind {
     /// that ranks factories has nothing to do on data like that, and neither
     /// does a policy gradient.
     pub fn is_ambiguous(self) -> bool {
-        matches!(self, LessonKind::AssemblerBank)
+        matches!(self, LessonKind::AssemblerBank | LessonKind::CircuitLine)
     }
 }
 
@@ -150,6 +174,7 @@ pub fn generate(kind: LessonKind, size: usize, seed: u64) -> Option<Sample> {
             LessonKind::AssemblerLine => gen_assembler_line(size, &mut rng),
             LessonKind::UndergroundCross => gen_underground_cross(size, &mut rng),
             LessonKind::AssemblerBank => gen_assembler_bank(size, &mut rng),
+            LessonKind::CircuitLine => gen_circuit_line(size, &mut rng),
         };
         if let Some(sample) = built {
             debug_assert!(
@@ -352,10 +377,10 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     }
     let y0 = rng.gen_range(0..=(size - LINE_H));
     let x0 = rng.gen_range(0..=(size - LINE_W));
-    let recipe = *Item::craftable().choose(rng).unwrap();
-    let input_item = recipe
-        .ingredient()
-        .expect("every craftable recipe has an ingredient");
+    // One source feeds one machine, so this lesson can only teach the recipes
+    // that need one thing. The two-input recipes are [`LessonKind::CircuitLine`].
+    let recipe = *Item::single_input_craftable().choose(rng).unwrap();
+    let input_item = recipe.ingredients()[0].item;
 
     // The machine's middle row: the one the line runs along.
     let y = y0 + 1;
@@ -470,10 +495,10 @@ fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     }
     let y0 = rng.gen_range(0..=(size - height));
     let x0 = rng.gen_range(0..=(size - width));
-    let recipe = *Item::craftable().choose(rng).unwrap();
-    let input_item = recipe
-        .ingredient()
-        .expect("every craftable recipe has an ingredient");
+    // Every line here is fed by one source, so — as in [`gen_assembler_line`] —
+    // only the single-input recipes fit.
+    let recipe = *Item::single_input_craftable().choose(rng).unwrap();
+    let input_item = recipe.ingredients()[0].item;
 
     // Line `j` is anchored at `machine(j)` and runs along `row(j)`, its middle.
     let machine = |j: usize| (x0 + 2, y0 + LINE_H * j);
@@ -575,6 +600,171 @@ fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
         protected,
         removable,
     })
+}
+
+/// Columns a [`LessonKind::CircuitLine`] occupies: copper source, its inserter,
+/// the cable machine's three, the shared inserter column, the circuit machine's
+/// three, the output inserter, the sink.
+const CIRCUIT_W: usize = 11;
+
+/// Rows it occupies: the iron source and its inserter stacked above the two
+/// machines' three.
+const CIRCUIT_H: usize = 5;
+
+/// Cable inserters the shared column offers. The machines' faces meet there, so
+/// there are exactly as many slots as a machine is tall.
+const CABLE_FEEDS: usize = 3;
+
+/// An electronic circuit, built from iron and copper the way Factorio builds it:
+///
+/// ```text
+///   .  .  .  .  .  .  Fe .  .  .  .
+///   .  .  .  .  .  .  i  .  .  .  .     <- south, into the circuit machine
+///   .  .  C  C  C  i  A  A  A  .  .
+///   Cu i  C  C  C  i  A  A  A  i  K
+///   .  .  C  C  C  i  A  A  A  .  .
+/// ```
+///
+/// `C` crafts copper cable from copper plate; `A` crafts the circuit from iron
+/// plate **and** that cable ([wiki](https://wiki.factorio.com/Electronic_circuit)).
+/// Two things here exist nowhere else in the curriculum:
+///
+/// * **A chain.** Two machines, two different recipes, and the second one's
+///   input is the first one's output. Every other lesson crafts in one step from
+///   a raw plate, so "what recipe goes here" was always read straight off the
+///   sink's own tag. Here the cable machine's recipe is not written down
+///   anywhere — it has to be derived from what the circuit needs.
+/// * **A join.** The machine runs only when *both* inputs arrive, so neither
+///   feed can be sacrificed for the other. A single-input line is a path; this
+///   is two paths that must both land, which is why [`crate::sim`] had to stop
+///   walking one item at a time and start reasoning about what has arrived.
+///
+/// The geometry is not a coincidence: the cable machine's east face and the
+/// circuit machine's west face are *the same column*, so an inserter placed
+/// there both unloads one machine and loads the other, and [`CABLE_FEEDS`] of
+/// them fit.
+///
+/// **How many is up to the answer**, and that is the second ambiguous family.
+/// The count matters because the recipe is unbalanced — one craft eats 1 plate
+/// and 3 cable — so a layout that feeds both inputs the same way starves on
+/// cable while iron piles up. One feed carries 0.86 cable/s and the machine
+/// wants 3× its iron rate, so it crafts at a third of what the iron alone would
+/// support; a second feed doubles the factory's output for one entity. A third
+/// adds nothing, because by then the *copper* inserter into the cable machine is
+/// the binding constraint — which is a fact about the layout that only a graded
+/// score can state, and `functional` calls all three answers perfect.
+fn gen_circuit_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    if size < CIRCUIT_W || size < CIRCUIT_H {
+        return None;
+    }
+    let x0 = rng.gen_range(0..=(size - CIRCUIT_W));
+    let y0 = rng.gen_range(0..=(size - CIRCUIT_H));
+
+    // The row the line runs along: the machines' middle.
+    let y = y0 + 3;
+    let cable = (x0 + 2, y0 + 2);
+    let circuit = (x0 + 6, y0 + 2);
+    let iron_source = (x0 + 6, y0);
+    let copper_source = (x0, y);
+    let sink = (x0 + CIRCUIT_W - 1, y);
+
+    let mut grid = Grid::new(size, size);
+    grid.set(
+        copper_source.0,
+        copper_source.1,
+        Cell {
+            entity: Entity::Source,
+            item: Item::CopperPlate,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        iron_source.0,
+        iron_source.1,
+        Cell {
+            entity: Entity::Source,
+            item: Item::IronPlate,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        sink.0,
+        sink.1,
+        Cell {
+            entity: Entity::Sink,
+            item: Item::GreenCircuit,
+            ..Default::default()
+        },
+    );
+    let protected = vec![
+        grid.idx(copper_source.0, copper_source.1),
+        grid.idx(iron_source.0, iron_source.1),
+        grid.idx(sink.0, sink.1),
+    ];
+
+    // As in `gen_assembler_bank`: everything the answer *may* write to, not
+    // everything this answer happened to write. Listing only the built cells
+    // would hand the model the cable count as conditioning and the family would
+    // stop being ambiguous.
+    let mut removable = Vec::new();
+    for gy in y0..y0 + CIRCUIT_H {
+        for gx in x0..x0 + CIRCUIT_W {
+            let i = grid.idx(gx, gy);
+            if !protected.contains(&i) {
+                removable.push(i);
+            }
+        }
+    }
+
+    // Copper plate in.
+    grid.set(x0 + 1, y, inserter(Direction::East));
+    grid.set(
+        cable.0,
+        cable.1,
+        Cell {
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item: Item::CopperCable,
+            misc: Misc::None,
+        },
+    );
+    // Iron plate down into the circuit machine's north face.
+    grid.set(x0 + 6, y0 + 1, inserter(Direction::South));
+    grid.set(
+        circuit.0,
+        circuit.1,
+        Cell {
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item: Item::GreenCircuit,
+            misc: Misc::None,
+        },
+    );
+    // The choice that makes this family ambiguous.
+    let feeds = rng.gen_range(1..=CABLE_FEEDS);
+    for j in 0..feeds {
+        grid.set(x0 + 5, y0 + 2 + j, inserter(Direction::East));
+    }
+    // Circuits out.
+    grid.set(x0 + 9, y, inserter(Direction::East));
+
+    if !item_reaches_sink(&grid) {
+        return None;
+    }
+    Some(Sample {
+        kind: LessonKind::CircuitLine,
+        solution: grid,
+        protected,
+        removable,
+    })
+}
+
+fn inserter(direction: Direction) -> Cell {
+    Cell {
+        entity: Entity::Inserter,
+        direction,
+        ..Default::default()
+    }
 }
 
 fn gen_underground_cross(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
@@ -744,10 +934,14 @@ mod tests {
             );
         }
         assert!(LessonKind::AssemblerBank.is_ambiguous());
+        // Every *other* family hands the model a task whose label is a function
+        // of the conditioning. `is_ambiguous` has to keep saying so, because
+        // `experiments/task_space` and every claim in `docs/RL_ANALYSIS.md` rest
+        // on it.
         assert!(LessonKind::all()
             .iter()
             .filter(|k| k.is_ambiguous())
-            .all(|k| *k == LessonKind::AssemblerBank));
+            .all(|k| matches!(k, LessonKind::AssemblerBank | LessonKind::CircuitLine)));
     }
 
     /// Ambiguity alone is not enough: if every answer delivered the same rate,
@@ -822,7 +1016,9 @@ mod tests {
             }
         }
 
-        for recipe in Item::craftable() {
+        // A bank line is one source into one machine, so it can only run the
+        // single-input recipes — the two-input ones are `CIRCUIT_LINE`'s job.
+        for recipe in Item::single_input_craftable() {
             let one = by_recipe[&(recipe as u8, 1)];
             assert!(one > 0.0, "a one-line bank delivers nothing");
             for lines in 2..=BANK_LINES {
@@ -924,5 +1120,143 @@ mod tests {
             .iter()
             .zip(&scratch)
             .any(|(cell, &obs)| cell.entity == Entity::Assembler && !obs));
+    }
+
+    /// How many cable inserters a circuit line's answer built.
+    fn cable_feeds(sample: &Sample) -> usize {
+        sample
+            .solution
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                c.entity == Entity::Inserter && {
+                    // The shared column: the one whose inserters unload the cable
+                    // machine. An inserter is there iff it picks up from an
+                    // assembler and drops into one.
+                    let (x, y) = (i % sample.solution.width, i / sample.solution.width);
+                    let (dx, dy) = c.direction.delta();
+                    let from = sample
+                        .solution
+                        .anchor_at((x as i32 - dx) as usize, (y as i32 - dy) as usize);
+                    let to = sample
+                        .solution
+                        .anchor_at((x as i32 + dx) as usize, (y as i32 + dy) as usize);
+                    let machine = |a: Option<(usize, usize)>| {
+                        a.is_some_and(|(ax, ay)| {
+                            sample.solution.get(ax, ay).entity == Entity::Assembler
+                        })
+                    };
+                    machine(from) && machine(to)
+                }
+            })
+            .count()
+    }
+
+    /// The circuit line is the only lesson that crafts from two different inputs,
+    /// and the assertion that matters is that the generator never emits one the
+    /// simulator would call broken — a machine fed iron but no cable crafts
+    /// nothing, and `generate`'s own `debug_assert` would have caught it, but
+    /// only in debug. CI runs `--release`.
+    #[test]
+    fn every_circuit_line_actually_delivers_circuits() {
+        let mut built = 0;
+        for seed in 0..200u64 {
+            let Some(sample) = generate(LessonKind::CircuitLine, 11, seed) else {
+                continue;
+            };
+            built += 1;
+            assert!(
+                sample.solution.is_consistent(),
+                "seed {seed} is unbuildable"
+            );
+            assert!(
+                sample.solution.footprints_are_legal(),
+                "seed {seed} overlaps its own machines"
+            );
+            assert!(
+                item_reaches_sink(&sample.solution),
+                "seed {seed} does not deliver"
+            );
+            assert!(
+                throughput::score(&sample.solution) > 0.0,
+                "seed {seed} routes but delivers nothing"
+            );
+        }
+        assert_eq!(built, 200, "the generator failed on some seeds");
+    }
+
+    /// The claim [`gen_circuit_line`]'s doc makes, checked rather than asserted
+    /// in prose: one cable feed starves the machine at a third of what its iron
+    /// supports, a second doubles the factory, and a third adds nothing because
+    /// the copper inserter upstream has become the constraint.
+    ///
+    /// This is the shape no single-input lesson can produce. A bank line's rate
+    /// is linear in the entity count — twice the lines, twice the output — so
+    /// "build more" is the whole lesson. Here the *same* entity is worth 2x, 1x
+    /// and nothing depending on where the bottleneck already is, and `functional`
+    /// scores all three answers identically.
+    #[test]
+    fn the_second_cable_feed_doubles_the_circuit_line_and_the_third_does_not() {
+        let mut by_feeds: HashMap<usize, f64> = HashMap::new();
+        for seed in 0..200u64 {
+            let Some(sample) = generate(LessonKind::CircuitLine, 11, seed) else {
+                continue;
+            };
+            let rate = throughput::score(&sample.solution);
+            let feeds = cable_feeds(&sample);
+            if let Some(previous) = by_feeds.insert(feeds, rate) {
+                assert!(
+                    (previous - rate).abs() < 1e-9,
+                    "{feeds} feeds delivered {previous} and {rate}"
+                );
+            }
+            // However few circuits it makes, it makes them.
+            assert!(item_reaches_sink(&sample.solution));
+        }
+        assert_eq!(
+            by_feeds.len(),
+            CABLE_FEEDS,
+            "not every feed count was drawn"
+        );
+
+        let (one, two, three) = (by_feeds[&1], by_feeds[&2], by_feeds[&3]);
+        assert!(
+            (two - one * 2.0).abs() < 1e-9,
+            "a second feed took {one} to {two}, not to {}",
+            one * 2.0
+        );
+        assert!(
+            (three - two).abs() < 1e-9,
+            "a third feed took {two} to {three}; the copper inserter should have capped it"
+        );
+    }
+
+    /// The join, stated as a fact about the simulator rather than the generator:
+    /// take a working line and delete the iron feed, and it stops making
+    /// circuits even though the cable still arrives and the machine is still
+    /// there.
+    ///
+    /// The old single-item walk could not have failed this test, because it
+    /// could not have passed the one above it: it asked "am I carrying the
+    /// ingredient?" and a two-ingredient recipe has no answer to that.
+    #[test]
+    fn a_circuit_machine_starved_of_either_input_crafts_nothing() {
+        let sample = generate(LessonKind::CircuitLine, 11, 0).expect("gen");
+        assert!(item_reaches_sink(&sample.solution));
+
+        for starve in [Item::IronPlate, Item::CopperPlate] {
+            let mut grid = sample.solution.clone();
+            let source = grid
+                .cells
+                .iter()
+                .position(|c| c.entity == Entity::Source && c.item == starve)
+                .expect("both sources exist");
+            grid.cells[source] = Cell::default();
+            assert!(
+                !item_reaches_sink(&grid),
+                "cut the {starve:?} feed and it still delivered circuits"
+            );
+        }
     }
 }

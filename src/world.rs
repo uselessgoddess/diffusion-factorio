@@ -178,13 +178,22 @@ impl Direction {
 /// see [`ASSEMBLER_CRAFTING_SPEED`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Recipe {
-    pub ingredient: Item,
-    /// Units of `ingredient` consumed per craft.
-    pub ingredient_qty: f64,
+    /// What one craft consumes. A machine runs at the rate of its **scarcest**
+    /// input, so an assembler drowning in iron and starved of cable makes
+    /// nothing — which is the whole reason a recipe is a list and not a field.
+    pub ingredients: &'static [Ingredient],
     /// Units of the product yielded per craft.
     pub output_qty: f64,
     /// Seconds per craft at crafting speed 1.
     pub crafting_time: f64,
+}
+
+/// One input to a recipe.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ingredient {
+    pub item: Item,
+    /// Units consumed per craft.
+    pub qty: f64,
 }
 
 impl Recipe {
@@ -199,9 +208,23 @@ impl Recipe {
         self.crafts_per_second() * self.output_qty
     }
 
-    /// Items per second of `ingredient` needed to keep the machine saturated.
-    pub fn max_input_rate(&self) -> f64 {
-        self.crafts_per_second() * self.ingredient_qty
+    /// Items per second of `item` needed to keep the machine saturated, or `0`
+    /// if this recipe does not use it.
+    pub fn max_input_rate(&self, item: Item) -> f64 {
+        self.crafts_per_second() * self.qty_of(item)
+    }
+
+    /// Units of `item` one craft consumes; `0` when the recipe does not use it.
+    pub fn qty_of(&self, item: Item) -> f64 {
+        self.ingredients
+            .iter()
+            .find(|i| i.item == item)
+            .map_or(0.0, |i| i.qty)
+    }
+
+    /// Does this recipe need more than one distinct input?
+    pub fn is_multi_input(&self) -> bool {
+        self.ingredients.len() > 1
     }
 }
 
@@ -241,16 +264,14 @@ impl Item {
         })
     }
 
-    /// The ingredient an assembler must be fed to craft this item, or `None`
-    /// for a raw item that no recipe produces.
+    /// Everything an assembler must be fed to craft this item. Empty for a raw
+    /// item that no recipe produces.
     ///
-    /// Single-ingredient simplification of the vanilla recipes (real green
-    /// circuits also need copper cable) — see [`Self::recipe`] for what still
-    /// stands in the way of lifting it. This is the one place the recipe graph is
-    /// defined — both the lesson generator and the simulator read it, so a
-    /// factory can never be generated that the simulator would call broken.
-    pub fn ingredient(self) -> Option<Self> {
-        self.recipe().map(|r| r.ingredient)
+    /// This is the one place the recipe graph is defined — both the lesson
+    /// generator and the simulator read it, so a factory can never be generated
+    /// that the simulator would call broken.
+    pub fn ingredients(self) -> &'static [Ingredient] {
+        self.recipe().map_or(&[], |r| r.ingredients)
     }
 
     /// The recipe that produces this item, or `None` for a raw item.
@@ -262,41 +283,53 @@ impl Item {
     /// items/s depending on the recipe. A model that only knows "connected"
     /// cannot see that difference.
     ///
-    /// The one deliberate departure from vanilla is that every recipe here has a
-    /// *single* ingredient. Real electronic circuits need 3 copper cable **and**
-    /// 1 iron plate; ours need only the plate.
+    /// These are the vanilla recipes as the wiki states them, including the
+    /// electronic circuit's **two** inputs. Until the 3×3 footprint landed they
+    /// could not be: a 1×1 machine has one tile in front and one behind, so a
+    /// second input had nowhere to go, and every recipe here was forced down to a
+    /// single ingredient. A 3×3 machine has twelve perimeter slots
+    /// ([`Grid::perimeter`]) and can be fed from as many sides as a recipe needs,
+    /// so the simplification is gone.
     ///
-    /// The reason used to be geometric: a 1×1 machine has one tile in front and
-    /// one behind, so it has nowhere to put a second input, and the departure was
-    /// forced. That reason is gone — a 3×3 machine has twelve perimeter slots
-    /// ([`Grid::perimeter`]) and can be fed from as many sides as a recipe needs.
-    /// What remains is this struct, which names one `ingredient`, and
-    /// [`crate::sim`]'s reachability check, which walks a single carried item and
-    /// so cannot express "this machine runs only once *both* inputs arrive".
-    /// [`crate::throughput`] already can: it propagates a per-item flow vector and
-    /// sums every predecessor. Lifting the simplification is now a change to those
-    /// two, not to the world (see `docs/ROADMAP.md`).
+    /// A two-input recipe is a different *kind* of problem, not a bigger one. A
+    /// single-input line is a path: connect A to B. A circuit needs two paths
+    /// that arrive at the same machine and neither may be sacrificed for the
+    /// other, and — because a craft consumes 3 cable per 1 plate — feeding them
+    /// equally is wrong. The layout that scores well has to be unbalanced on
+    /// purpose, which nothing in a connectivity metric can express.
     pub fn recipe(self) -> Option<Recipe> {
-        // 2 iron plate -> 1 iron gear wheel, 0.5 s (vanilla).
-        // 1 copper plate -> 2 copper cable, 0.5 s (vanilla).
-        // 1 iron plate -> 1 electronic circuit, 0.5 s (vanilla minus the copper
-        // cable ingredient, per the single-ingredient simplification above).
         Some(match self {
+            // 2 iron plate -> 1 iron gear wheel, 0.5 s.
             Self::IronGear => Recipe {
-                ingredient: Self::IronPlate,
-                ingredient_qty: 2.0,
+                ingredients: &[Ingredient {
+                    item: Self::IronPlate,
+                    qty: 2.0,
+                }],
                 output_qty: 1.0,
                 crafting_time: 0.5,
             },
+            // 1 copper plate -> 2 copper cable, 0.5 s.
             Self::CopperCable => Recipe {
-                ingredient: Self::CopperPlate,
-                ingredient_qty: 1.0,
+                ingredients: &[Ingredient {
+                    item: Self::CopperPlate,
+                    qty: 1.0,
+                }],
                 output_qty: 2.0,
                 crafting_time: 0.5,
             },
+            // 1 iron plate + 3 copper cable -> 1 electronic circuit, 0.5 s.
+            // https://wiki.factorio.com/Electronic_circuit
             Self::GreenCircuit => Recipe {
-                ingredient: Self::IronPlate,
-                ingredient_qty: 1.0,
+                ingredients: &[
+                    Ingredient {
+                        item: Self::IronPlate,
+                        qty: 1.0,
+                    },
+                    Ingredient {
+                        item: Self::CopperCable,
+                        qty: 3.0,
+                    },
+                ],
                 output_qty: 1.0,
                 crafting_time: 0.5,
             },
@@ -307,6 +340,16 @@ impl Item {
     /// Items an assembler can be given as a recipe.
     pub fn craftable() -> [Self; 3] {
         [Self::IronGear, Self::CopperCable, Self::GreenCircuit]
+    }
+
+    /// The craftables a single feed line can satisfy. The lessons that lay one
+    /// source into one machine can only teach these; a two-input recipe needs a
+    /// lesson that builds two feeds ([`crate::factory_gen::LessonKind`]).
+    pub fn single_input_craftable() -> Vec<Self> {
+        Self::craftable()
+            .into_iter()
+            .filter(|i| i.recipe().is_some_and(|r| !r.is_multi_input()))
+            .collect()
     }
 }
 

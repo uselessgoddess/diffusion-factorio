@@ -272,7 +272,15 @@ fn transform(grid: &Grid, idx: usize, input: &Flow) -> Flow {
         Entity::Assembler => {
             let mut out = NO_FLOW;
             if let Some(recipe) = cell.item.recipe() {
-                let supplied = input[recipe.ingredient as usize] / recipe.ingredient_qty;
+                // A machine runs at the rate of its *scarcest* input. An
+                // assembler swimming in iron plate and starved of copper cable
+                // makes nothing, so the min is the craft rate — not the sum, and
+                // not the rate of whichever input the belt happens to favour.
+                let supplied = recipe
+                    .ingredients
+                    .iter()
+                    .map(|i| input[i.item as usize] / i.qty)
+                    .fold(f64::INFINITY, f64::min);
                 let crafts = supplied.min(recipe.crafts_per_second());
                 out[cell.item as usize] = crafts * recipe.output_qty;
             }
