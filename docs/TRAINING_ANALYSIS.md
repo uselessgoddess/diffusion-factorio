@@ -84,9 +84,13 @@ stood during this run**:
 exposures shift — ~0.6× / ~296× / ~242× — because six families now share the step
 budget, the assembler is 3×3, and vanilla recipes leave a single-source line only
 two of the three recipes to roll. None of it rescues the argument below: 90
-templates seen ~296× each is *more* memorizable than 231 seen ~173×. Every step
-toward realism has made this worse, which is why grid size is now the top of the
-roadmap.)
+templates seen ~296× each is *more* memorizable than 231 seen ~173×.
+
+Worse, even 90 flatters it. `task_space` now also counts factories with
+translations collapsed, and `assembler_line` has **2** distinct shapes — the two
+recipes it can roll. The other 45× is the same template at another offset, which
+a fully-convolutional denoiser generalizes over for free. The real number is 2,
+and it is 2 on a 19×19 board too. See `docs/ROADMAP.md` bottleneck 0.)
 
 **The curriculum splits cleanly in half.**
 

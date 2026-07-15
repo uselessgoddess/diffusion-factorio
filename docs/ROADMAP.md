@@ -133,12 +133,49 @@ seven ways down, giving **7 tasks, seen ~3,810× each in a 5,000-step run**.
 
 The ambiguity survived all of it (30 of 30 and 7 of 7, three answers each), so
 what step 4 bought is intact. But the honest reading is that the templated
-families are now *more* memorizable than the numbers quoted above them, and the
-fix is not to shrink the machines back or re-fictionalize the recipes. **It is
-that size 11 is too small a canvas for real 3×3 machines and real recipes** —
-the same conclusion bottleneck 0 reaches from the other direction, now reached
-twice more. Grid size is the knob, and `CIRCUIT_LINE` at 7 tasks makes it the
-single highest-value change left. See the open half of step 4.
+families are now *more* memorizable than the numbers quoted above them.
+
+**An earlier draft of this section concluded "grid size is the knob" and made it
+the top of the roadmap. That was wrong, and measuring it is what showed why.**
+Every factor in those counts is a *placement*: each generator stamps a fixed
+template at `rng.gen_range(0..=(size - W))`, so the totals are closed forms in
+the board size — `ASSEMBLER_LINE` is `2(S−6)(S−2)`, `CIRCUIT_LINE` is
+`(S−10)(S−4)`. Collapse translations and ask what is actually distinct:
+
+```
+                            factories   shapes    of which
+ASSEMBLER_LINE      S=11           90        2   45× translation
+                    S=19          442        2  221× translation
+ASSEMBLER_BANK      S=11           90        6   15× translation
+                    S=19          858        6  143× translation
+CIRCUIT_LINE        S=11           21        3    7× translation
+                    S=19          405        3  135× translation
+UNDERGROUND_CROSS   S=11          110        2   55× translation
+                    S=19          494        2  247× translation
+MOVE_ONE_ITEM_CHAOS S=11       200000   200000    1× translation
+                    S=19       200000   200000    1× translation
+```
+
+The shape counts are **exactly flat** — 2, 6, 3, 2 at every size. And they have
+causes, not coincidences: `ASSEMBLER_LINE` rolls two single-input recipes (a
+green circuit needs two inputs, so `Item::single_input_craftable()` is two long),
+`UNDERGROUND_CROSS` two items, `ASSEMBLER_BANK` two recipes × three line counts,
+`CIRCUIT_LINE` three cable feeds. **Thirteen layouts across the four lessons that
+build real factories.**
+
+That kills the grid-size argument outright, because the denoiser is `same`-padded
+convolution end to end (`src/model.rs`, asserted by
+`one_set_of_weights_runs_at_any_grid_size`) — translation is precisely the
+variation it is equivariant to *for free*. Going 11 → 19 multiplies offsets by
+~5, structure by exactly 1, and compute by ~3 (121 → 361 cells). It buys the
+model nothing it does not already have.
+
+`MOVE_ONE_ITEM_CHAOS` is the control that shows what does work: 200,000 shapes
+from 200,000 seeds, at every size. It does not stamp anything. It scatters
+obstacles into the conditioning plane and derives its belts by BFS *through*
+them, so the label is a function of a randomized world. **The bottleneck is not
+the size of the canvas — it is that four of six lessons paint the same picture on
+it. Give them the chaos treatment; see step 4.**
 
 A caution learned the hard way here: `Sample::blank` observes every cell it does
 not blank, so `removable` must list the region an answer *may* build, not the
@@ -251,14 +288,31 @@ the copper inserter upstream is the constraint. That is the first task here
 where the good answer is a *ratio*, and the first place `functional` and a
 graded score disagree on identically-working factories.
 
-**Next: raise the grid size, before anything else here.** Each of the two steps
-above made the curriculum more honest and the task space smaller — real
-footprints took `ASSEMBLER_BANK` from 189 tasks to 45, vanilla recipes took it to
-30, and `CIRCUIT_LINE` was born at 7. An 11×11 board cannot hold the lessons we
-now know how to write, and every remaining item on this list makes lessons that
-are *bigger*. Then: a 2×2 furnace to prove the footprint machinery is not
-3×3-shaped, branching buses, curriculum weighting by difficulty, and held-out
-lesson kinds to measure generalization.
+**Next: randomize the world these lessons are built in, before anything else
+here.** Each of the two steps above made the curriculum more honest and the task
+space smaller — real footprints took `ASSEMBLER_BANK` from 189 tasks to 45,
+vanilla recipes took it to 30, and `CIRCUIT_LINE` was born at 7. The reflex is to
+blame the 11×11 board, and this document did exactly that until the counts were
+measured with translations collapsed (bottleneck 0). They are not small because
+the canvas is small. They are small because a generator that stamps a fixed block
+teaches one layout no matter how much room it is given: **2, 6, 3 and 2 shapes,
+identical at 11 and at 19.**
+
+`MOVE_ONE_ITEM_CHAOS` already shows the shape of the fix, and it is the only
+family whose variety does not run out. Scatter obstacles into the conditioning
+plane; place the source, the machine and the sink at random; then *route* the
+belts through what is left with the BFS that family already uses, instead of
+stamping a 7×3 rectangle. The label stops being a constant and becomes a function
+of a world the model can see — which is the actual factory-design task, and is
+unbounded in variety at any board size.
+
+Grid size then stops being a bottleneck and becomes what it always was: a *knob*,
+worth turning once the lessons have something to spend the room on. It is
+already one — `--size` on all three binaries — and the denoiser needs no change
+to honour it (`one_set_of_weights_runs_at_any_grid_size`). After that: a 2×2
+furnace to prove the footprint machinery is not 3×3-shaped, branching buses,
+curriculum weighting by difficulty, and held-out lesson kinds to measure
+generalization.
 
 ### 5. Compute path — the GPU is idle, and the schedule wastes 40% of the run
 Not a wall, but free money. Profiled from the 5,000-step run's report:
@@ -312,14 +366,17 @@ see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
    count. Together they are what gives steps 2 and 3 something to do and what
    makes `beat_original` reachable at all.
    **Still open:** the other four families remain rigid, and both ambiguous ones
-   are small and shrinking. Real 3×3 footprints took the bank from 189 tasks to
-   45; vanilla recipes then took it to 30 (~889× each), because a one-source line
-   can no longer be asked for a two-input circuit. `CIRCUIT_LINE` is worse — 11×5
-   fits an 11×11 board exactly **7** ways (~3,810× each). **Raising the grid size
-   is now the prerequisite**, not a nice-to-have: there is nowhere left to put a
-   real machine. The next ambiguous family should be at `move_one_item` scale —
-   multi-source/multi-sink, several recipes, tighter obstacle budgets — on a
-   canvas big enough to hold real machines.
+   are small. Real 3×3 footprints took the bank from 189 tasks to 45; vanilla
+   recipes then took it to 30 (~889× each), because a one-source line can no
+   longer be asked for a two-input circuit. `CIRCUIT_LINE` is worse — 7 tasks,
+   ~3,810× each. This entry read "**raising the grid size is now the
+   prerequisite**" until the shapes were counted: those two families hold **6**
+   and **3** distinct layouts, and hold exactly the same 6 and 3 on a 19×19 board
+   (bottleneck 0). The room was never the constraint. **The prerequisite is
+   generators that randomize and route rather than stamp** — `MOVE_ONE_ITEM_CHAOS`
+   does this and never runs out of tasks at any size. The next ambiguous family
+   should be at `move_one_item_chaos` scale: multi-source/multi-sink, several
+   recipes, obstacles it has to design around.
 5. **Tune the imbalance knobs** — sweep `structure_weight`, add focal loss,
    compare mean-CE vs `--elbo`.
 6. **Cheap architecture wins from the reference** — 1×1-conv tile head → softmax
@@ -342,11 +399,13 @@ see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
      passes" rather than "better than nothing". See
      [`RL_ANALYSIS.md` §3.2](RL_ANALYSIS.md).
    - **Two ambiguous families out of six is a thin base, and they are tiny.** RL
-     would optimise throughput on `ASSEMBLER_BANK` (30 memorizable tasks) and
-     `CIRCUIT_LINE` (7). The bank alone could be won by memorising "always build
-     3 lines" without learning anything about design; `CIRCUIT_LINE` at least
-     punishes that reflex, but 7 tasks is a lookup table. Widen the ambiguous
-     curriculum first (step 4's open half), which means grid size first.
+     would optimise throughput on `ASSEMBLER_BANK` (30 memorizable tasks, **6
+     distinct layouts**) and `CIRCUIT_LINE` (7 tasks, **3 layouts**). The bank
+     alone could be won by memorising "always build 3 lines" without learning
+     anything about design; `CIRCUIT_LINE` at least punishes that reflex, but
+     three layouts is a lookup table, and stays three on any board. Widen the
+     ambiguous curriculum first (step 4's open half) — by randomizing the world,
+     not by enlarging it.
    - **The simulator has not been parity-checked** (step 7). RL optimises the
      reward it is given, exactly and remorselessly. Handing it an unverified
      simulator means it will find that simulator's bugs rather than good

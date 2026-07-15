@@ -383,10 +383,11 @@ That is the first task here whose answer is a **ratio** rather than an amount,
 and the first place where the reward stops rewarding effort. A policy gradient
 on `ASSEMBLER_BANK` alone would learn "more entities"; this family punishes it.
 
-(It is also the family that most needs a bigger grid — 11×5 fits an 11×11 board
-exactly 7 ways, so there are only 7 distinct tasks. See `ROADMAP.md` bottleneck
-0: the curriculum is now realistic enough that size 11 is the binding
-constraint.)
+(It is also the smallest family in the curriculum — 11×5 fits an 11×11 board
+exactly 7 ways, so there are only 7 distinct tasks, and this analysis once read
+that as evidence the board was too small. It is not: those 7 tasks are 7
+*offsets* of **3** layouts, one per cable feed, and a 19×19 board yields 135
+offsets of the same 3. See `ROADMAP.md` bottleneck 0.)
 
 ### 3.5 Wired into the metrics
 
@@ -470,8 +471,12 @@ reasons to not do it *next*:
    least punishes "build everything" — its third cable feed is worth nothing
    (§3.4) — so the degenerate policy is no longer free. But 7 tasks is a lookup
    table, not a distribution: a model could memorize "two feeds" per task without
-   learning one thing about design, and the metric would applaud. **Grid size is
-   the prerequisite**, and it is now the prerequisite twice over.
+   learning one thing about design, and the metric would applaud. This point read
+   "**grid size is the prerequisite**" until the counts were taken with
+   translations collapsed: the two families hold **6** and **3** distinct layouts,
+   unchanged from an 11×11 board to a 19×19 one, because each generator stamps a
+   fixed template and only slides it. **The prerequisite is generators that
+   randomize and route rather than stamp** (`docs/ROADMAP.md` bottleneck 0).
 3. **The simulator has not been parity-checked against Factorio.** RL optimizes
    the reward it is given, exactly and remorselessly. Hand it an unverified
    simulator and it will find that simulator's bugs rather than good factories —
@@ -559,16 +564,23 @@ Full detail and rationale in [`docs/ROADMAP.md`](ROADMAP.md).
    rest of this list is about earning the right to use it rather than about RL.
    Worth re-running on a full-size checkpoint; the numbers above are from a
    scaled-down one.
-2. **Widen the ambiguous curriculum** — the open half of the work here. Four of
-   six families are still rigid, and the two that are not are small and getting
-   smaller: the bank is 30 memorizable tasks (189 before the assemblers were 3×3
-   and the recipes were vanilla), and `CIRCUIT_LINE` is **7**, because an 11×5
-   block fits an 11×11 grid one way across and seven ways down. **Raise the grid
-   size first** — every other part of this item is blocked on it, and each step
-   toward realism has tightened the squeeze rather than eased it. Then take the
-   next ambiguous family to `move_one_item` scale: multi-source/multi-sink,
-   several recipes, tighter obstacle budgets. This is the single highest-value
-   item on the list — §1.3 says the curriculum is what is capping the model.
+2. **Widen the ambiguous curriculum** — the open half of the work here, and the
+   single highest-value item on the list (§1.3 says the curriculum is what is
+   capping the model). Four of six families are still rigid, and the two that are
+   not are small: the bank is 30 memorizable tasks (189 before the assemblers were
+   3×3 and the recipes were vanilla), and `CIRCUIT_LINE` is **7**.
+
+   This item used to say "**raise the grid size first**". It was wrong, and
+   `task_space` now measures why: collapse translations and the bank holds **6**
+   distinct layouts and `CIRCUIT_LINE` **3** — the same 6 and 3 at 19×19, because
+   every other factor in those counts is an offset, and offsets are what a
+   `same`-padded conv net already handles for free. **Randomize the world first,
+   not the board size.** `MOVE_ONE_ITEM_CHAOS` is the existence proof: obstacles
+   in the conditioning plane, belts routed through them by BFS, 200,000 distinct
+   shapes from 200,000 seeds, at every size. Give the machine lessons the same
+   treatment — random source/machine/sink placement and real routing — and then
+   take the next ambiguous family to that scale: multi-source/multi-sink, several
+   recipes, obstacles it has to design around.
 3. **Fix the schedule** — stop at ~3,000 steps or extend the task; raise batch
    size until the GPU saturates (§1.4). ~40% of a run is currently free money.
 4. **Cheap architecture wins from the reference** — the 520-param tile head.
