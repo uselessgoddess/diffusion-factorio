@@ -143,17 +143,17 @@ the board size — `ASSEMBLER_LINE` is `2(S−6)(S−2)`, `CIRCUIT_LINE` is
 `(S−10)(S−4)`. Collapse translations and ask what is actually distinct:
 
 ```
-                            factories   shapes    of which
-ASSEMBLER_LINE      S=11           90        2   45× translation
-                    S=19          442        2  221× translation
-ASSEMBLER_BANK      S=11           90        6   15× translation
-                    S=19          858        6  143× translation
-CIRCUIT_LINE        S=11           21        3    7× translation
-                    S=19          405        3  135× translation
-UNDERGROUND_CROSS   S=11          110        2   55× translation
-                    S=19          494        2  247× translation
-MOVE_ONE_ITEM_CHAOS S=11       200000   200000    1× translation
-                    S=19       200000   200000    1× translation
+                            factories   shapes    of which        answers
+ASSEMBLER_LINE      S=11           90        2   45× translation        1
+                    S=19          442        2  221× translation        1
+ASSEMBLER_BANK      S=11           90        6   15× translation        6
+                    S=19          858        6  143× translation        6
+CIRCUIT_LINE        S=11           21        3    7× translation        3
+                    S=19          405        3  135× translation        3
+UNDERGROUND_CROSS   S=11          110        2   55× translation        1
+                    S=19          494        2  247× translation        1
+MOVE_ONE_ITEM_CHAOS S=11       200000   200000    1× translation    17855
+                    S=19       200000   200000    1× translation    17855
 ```
 
 The shape counts are **exactly flat** — 2, 6, 3, 2 at every size. And they have
@@ -162,6 +162,19 @@ green circuit needs two inputs, so `Item::single_input_craftable()` is two long)
 `UNDERGROUND_CROSS` two items, `ASSEMBLER_BANK` two recipes × three line counts,
 `CIRCUIT_LINE` three cable feeds. **Thirteen layouts across the four lessons that
 build real factories.**
+
+The `answers` column is worse still, and it is the one to trust. `shapes` keys the
+whole board, so a family that scatters obstacles scores a perfect count for free
+whether or not the obstacles change the label — which matters, because scattering
+obstacles is exactly the fix proposed below. `answers` keys only the cells the
+model is asked to fill, modulo translation, and it is the number a chaos family
+cannot fake. Under it, `ASSEMBLER_LINE` and `UNDERGROUND_CROSS` teach **one
+answer each, not two**: the recipe and the item ride the *protected* source and
+assembler cells, so the two shapes differ only where the model can already read
+the difference off the conditioning. The cells it must actually produce are the
+same picture every time — drawn ~254× per task in a 5,000-step run.
+`MOVE_ONE_ITEM_CHAOS` deflates too, from 200,000 to 17,855: honest, and still
+three orders of magnitude clear of the rest.
 
 That kills the grid-size argument outright, because the denoiser is `same`-padded
 convolution end to end (`src/model.rs`, asserted by
@@ -176,6 +189,9 @@ obstacles into the conditioning plane and derives its belts by BFS *through*
 them, so the label is a function of a randomized world. **The bottleneck is not
 the size of the canvas — it is that four of six lessons paint the same picture on
 it. Give them the chaos treatment; see step 4.**
+
+**Step 4 has since done exactly that for the assembler lesson.**
+`ASSEMBLER_CHAOS` scores 197,228 answers against `ASSEMBLER_LINE`'s 1.
 
 A caution learned the hard way here: `Sample::blank` observes every cell it does
 not blank, so `removable` must list the region an answer *may* build, not the
@@ -296,15 +312,51 @@ blame the 11×11 board, and this document did exactly that until the counts were
 measured with translations collapsed (bottleneck 0). They are not small because
 the canvas is small. They are small because a generator that stamps a fixed block
 teaches one layout no matter how much room it is given: **2, 6, 3 and 2 shapes,
-identical at 11 and at 19.**
+identical at 11 and at 19** — and once the cells the model can already read off
+the conditioning are discounted, **1, 6, 3 and 1 answers.**
 
-`MOVE_ONE_ITEM_CHAOS` already shows the shape of the fix, and it is the only
-family whose variety does not run out. Scatter obstacles into the conditioning
+`MOVE_ONE_ITEM_CHAOS` already showed the shape of the fix, and it was the only
+family whose variety did not run out. Scatter obstacles into the conditioning
 plane; place the source, the machine and the sink at random; then *route* the
 belts through what is left with the BFS that family already uses, instead of
 stamping a 7×3 rectangle. The label stops being a constant and becomes a function
 of a world the model can see — which is the actual factory-design task, and is
 unbounded in variety at any board size.
+
+**Done for the assembler lesson: `ASSEMBLER_CHAOS`.** 197,228 distinct answers
+from 200,000 seeds, against `ASSEMBLER_LINE`'s 1, and none of them ambiguous —
+every task still has exactly one answer, so it needs no `is_ambiguous` handling.
+A 5,000-step run now sees each task ~0.1× instead of ~254×: the model cannot meet
+the same task twice, which is the point.
+
+Two things about writing it are worth keeping, because both produced factories
+that the *functional* simulator happily passed and the *graded* one scored zero,
+and neither was visible in the ASCII render:
+
+* **Inserter geometry is not negotiable.** An inserter reaches exactly one tile
+  behind it and drops exactly one tile ahead (`throughput::accepts_from`), so
+  machine → inserter → belt must be colinear. The belts are not free to meet the
+  inserter at whichever face BFS liked. Aiming the inserter at the route instead
+  made it scenery — and `item_reaches_sink` still said yes, because the assembler
+  offers its output to its whole perimeter and the outbound belt was standing on
+  one. `every_inserter_pushes_into_something_real` is the regression test; it was
+  confirmed to fail on the reintroduced bug while the functional test passed.
+* **A source is unlimited, and offers to every neighbour.** `throughput` seeds it
+  with `f64::INFINITY` and `clamp_total` hands an unlimited supply the whole belt,
+  crowding every finite one off it. So a plate source touching the gear line does
+  not add plates to it, it *replaces* the gears; the sink then filters the plates
+  out as the wrong item and a factory whose every belt is correct delivers zero.
+  That was 49 of 200 generated factories. The gear route now avoids the source's
+  neighbours; the plate route need not, since more of what it already carries is
+  harmless.
+
+Both were found with `experiments/why_zero.rs`, which hunts factories that are
+functional but score zero and dumps the cells rather than the glyphs — the render
+draws an inserter as `i` whichever way the hand swings, which is precisely the bug.
+All seven families now report 0 of 200. **`UNDERGROUND_CROSS`, `ASSEMBLER_BANK`
+and `CIRCUIT_LINE` are still templates** and want the same treatment; the bank is
+the interesting one, since it is the only family that is honestly ambiguous and
+that property has to survive the randomization.
 
 Grid size then stops being a bottleneck and becomes what it always was: a *knob*,
 worth turning once the lessons have something to spend the room on. It is
