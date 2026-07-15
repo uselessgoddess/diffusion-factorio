@@ -24,6 +24,17 @@ use rand_chacha::ChaCha8Rng;
 const DEFAULT_SIZE: usize = 11;
 const SEEDS: u64 = 200_000;
 
+/// What one lesson family measured out to.
+struct Family {
+    name: &'static str,
+    tasks: usize,
+    repeats: f64,
+    ambiguous: usize,
+    factories: usize,
+    /// [`factories`](Self::factories) with translations collapsed.
+    shapes: usize,
+}
+
 /// Canonical key for a full factory. Uses every channel (the ASCII view is
 /// glyph-only and would silently collapse recipes/items together).
 fn factory_key(g: &Grid) -> String {
@@ -41,6 +52,42 @@ fn factory_key(g: &Grid) -> String {
             if g.is_obstacle(x, y) {
                 s.push_str(&format!("#{x},{y};"));
             }
+        }
+    }
+    s
+}
+
+/// Canonical key for a factory *modulo translation*: the same layout slid to
+/// another corner of the board collapses onto one key.
+///
+/// This is the honest denominator. [`factory_key`] counts a template at every
+/// offset it fits, and those counts are what `docs/ROADMAP.md` reads as "task
+/// space" — but the denoiser is a stack of `same`-padded convolutions
+/// (`model.rs`, and see `one_set_of_weights_runs_at_any_grid_size`), so
+/// translation is the one variation it is equivariant to by construction. A
+/// count that grows only because the board got wider is counting free lunches.
+fn translation_invariant_key(g: &Grid) -> String {
+    let occupied: Vec<(usize, usize, Cell)> = (0..g.height)
+        .flat_map(|y| (0..g.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| !g.cells[y * g.width + x].is_empty() || g.is_obstacle(x, y))
+        .map(|(x, y)| (x, y, g.cells[y * g.width + x]))
+        .collect();
+    let Some(min_x) = occupied.iter().map(|&(x, _, _)| x).min() else {
+        return String::new();
+    };
+    let min_y = occupied.iter().map(|&(_, y, _)| y).min().unwrap();
+
+    let mut s = String::new();
+    for (x, y, c) in occupied {
+        let (dx, dy) = (x - min_x, y - min_y);
+        if !c.is_empty() {
+            s.push_str(&format!(
+                "{dx},{dy}:{}:{}:{}:{};",
+                c.entity as u8, c.direction as u8, c.item as u8, c.misc as u8
+            ));
+        }
+        if g.is_obstacle(x, y) {
+            s.push_str(&format!("#{dx},{dy};"));
         }
     }
     s
@@ -107,6 +154,7 @@ fn main() {
     for &kind in LessonKind::all().iter().filter(|k| size >= k.min_size()) {
         let t0 = Instant::now();
         let mut factories = HashSet::new();
+        let mut shapes = HashSet::new();
         let mut generated = 0usize;
         // (conditioning -> set of distinct answers) proves whether the label is a
         // deterministic function of what the model conditions on.
@@ -118,6 +166,7 @@ fn main() {
             };
             generated += 1;
             factories.insert(factory_key(&sample.solution));
+            shapes.insert(translation_invariant_key(&sample.solution));
 
             // Reproduce exactly what train.rs validation does: blank every
             // removable cell, keep the protected scaffold observed.
@@ -151,23 +200,64 @@ fn main() {
             "",
             generated as f64 / secs,
         );
-        totals.push((kind.name(), answers_per_context.len(), repeats, ambiguous));
+        println!(
+            "{:<22}   distinct *shapes* (same layout at another offset collapsed): {:>6}",
+            "",
+            shapes.len(),
+        );
+        totals.push(Family {
+            name: kind.name(),
+            tasks: answers_per_context.len(),
+            repeats,
+            ambiguous,
+            factories: factories.len(),
+            shapes: shapes.len(),
+        });
     }
 
     println!("\n  A 'task' = one distinct conditioning the model is asked to complete.");
     println!("  Families small enough to memorize outright (each task seen many times):");
-    for (name, tasks, repeats, _) in totals.iter().filter(|(_, _, r, _)| *r > 10.0) {
-        println!("    {name:<22} {tasks:>6} tasks, seen ~{repeats:.0}x each");
+    for f in totals.iter().filter(|f| f.repeats > 10.0) {
+        println!(
+            "    {:<22} {:>6} tasks, seen ~{:.0}x each",
+            f.name, f.tasks, f.repeats
+        );
     }
     println!("  Families too large to memorize (each task seen ~once => real generalization):");
-    for (name, tasks, repeats, _) in totals.iter().filter(|(_, _, r, _)| *r <= 10.0) {
-        println!("    {name:<22} {tasks:>6}+ tasks, seen ~{repeats:.1}x each");
+    for f in totals.iter().filter(|f| f.repeats <= 10.0) {
+        println!(
+            "    {:<22} {:>6}+ tasks, seen ~{:.1}x each",
+            f.name, f.tasks, f.repeats
+        );
     }
 
+    println!("\n=== 1b. How much of that is structure, and how much is sliding? ===");
+    println!("  The denoiser is `same`-padded convolutions end to end, so a layout");
+    println!("  moved to another offset is the one variation it generalizes over for");
+    println!("  free. Collapsing translations is therefore the honest count of what");
+    println!("  a family actually teaches:\n");
+    println!(
+        "  {:<22} {:>10} {:>8} {:>12}",
+        "family", "factories", "shapes", "of which new"
+    );
+    for f in &totals {
+        let slide = f.factories as f64 / f.shapes.max(1) as f64;
+        println!(
+            "  {:<22} {:>10} {:>8} {:>11.0}x translation",
+            f.name, f.factories, f.shapes, slide
+        );
+    }
+    println!("\n  A family whose `shapes` count stays flat as SIZE grows is not gaining");
+    println!("  task space on a bigger board -- it is gaining offsets. Compare two");
+    println!("  sizes to see which of these numbers actually move.");
+
     println!("\n=== 2. Is `exact` a fair metric? (is the target label unique?) ===");
-    let (rigid, ambiguous): (Vec<_>, Vec<_>) = totals.iter().partition(|(_, _, _, a)| *a == 0);
-    for (name, tasks, _, _) in &rigid {
-        println!("  {name:<22} every one of its {tasks} tasks has exactly 1 answer");
+    let (rigid, ambiguous): (Vec<_>, Vec<_>) = totals.iter().partition(|f| f.ambiguous == 0);
+    for f in &rigid {
+        println!(
+            "  {:<22} every one of its {} tasks has exactly 1 answer",
+            f.name, f.tasks
+        );
     }
     println!("For these the label is a deterministic function of the input. `exact=1.0`");
     println!("is reachable, and since a correct exact match is always functional,");
@@ -175,8 +265,11 @@ fn main() {
     println!("factory-design skill -- and it is why the 5,000-step run's two headline");
     println!("metrics moved as one: there was only ever one answer, so getting it right");
     println!("and getting it working were the same event.\n");
-    for (name, tasks, _, a) in &ambiguous {
-        println!("  {name:<22} {a} of its {tasks} tasks admit more than one answer");
+    for f in &ambiguous {
+        println!(
+            "  {:<22} {} of its {} tasks admit more than one answer",
+            f.name, f.ambiguous, f.tasks
+        );
     }
     if ambiguous.is_empty() {
         println!("  (none -- nothing here can teach the model to choose)");
