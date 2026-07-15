@@ -12,7 +12,7 @@
 //! "normalized throughput" reward — a task-level, simulator-grounded signal that
 //! per-cell accuracy alone cannot capture.
 
-use crate::world::{Direction, Entity, Grid, Misc};
+use crate::world::{Direction, Entity, Grid, Item, Misc};
 use std::collections::VecDeque;
 
 /// Maximum tiles an underground belt can span (yellow-belt reach), mirroring
@@ -71,42 +71,91 @@ fn flow_targets(grid: &Grid, x: usize, y: usize) -> Vec<(usize, usize)> {
     out
 }
 
-/// Does the item reach a sink from at least one source, following belts?
+/// Does a source's item actually reach a sink that accepts it?
 ///
 /// A source feeds any orthogonally adjacent belt; flow then follows belt
-/// directions until it reaches (points into) a sink or dead-ends.
+/// directions until it reaches (points into) a sink or dead-ends. The carried
+/// item travels with the flow: belts pass it through unchanged, an assembler
+/// consumes its recipe's ingredient and emits the product, and a sink only
+/// accepts the item it is configured for.
+///
+/// Tracking the item is what stops the check rewarding a factory that merely
+/// *connects* source to sink. Without it, belting raw iron plates straight into
+/// a gear sink scores the same as building the gear assembler — the reference
+/// guards the same hole in `factorion_rs/src/throughput.rs:205-226`, where
+/// sinks only score their configured item.
 pub fn item_reaches_sink(grid: &Grid) -> bool {
-    let sources: Vec<(usize, usize)> = positions(grid, Entity::Source);
-    let sinks: Vec<(usize, usize)> = positions(grid, Entity::Sink);
+    let sources = positions(grid, Entity::Source);
+    let sinks = positions(grid, Entity::Sink);
     if sources.is_empty() || sinks.is_empty() {
         return false;
     }
 
-    let mut visited = vec![false; grid.len()];
-    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+    // State is (cell, carried item): the same tile can legitimately be reached
+    // carrying different items, and only some of them satisfy the sink.
+    let mut visited = vec![[false; Item::COUNT]; grid.len()];
+    let mut queue: VecDeque<((usize, usize), Item)> = VecDeque::new();
 
-    // Seed: belts orthogonally adjacent to any source are entry points.
+    // Seed: belts orthogonally adjacent to any source are entry points, and
+    // they start out carrying that source's item.
     for &(sx, sy) in &sources {
+        let carried = grid.get(sx, sy).item;
         for (nx, ny) in orthogonal(grid, sx, sy) {
-            if is_conveyor(grid, nx, ny) && !visited[grid.idx(nx, ny)] {
-                visited[grid.idx(nx, ny)] = true;
-                queue.push_back((nx, ny));
+            if is_conveyor(grid, nx, ny) {
+                push(grid, &mut visited, &mut queue, (nx, ny), carried);
             }
         }
     }
 
-    while let Some((x, y)) = queue.pop_front() {
+    while let Some(((x, y), carried)) = queue.pop_front() {
+        // An assembler transforms what passes through it: it only runs if fed
+        // its ingredient, and what leaves is the product.
+        let carried = match transform(grid, x, y, carried) {
+            Some(item) => item,
+            None => continue, // wrong ingredient: the machine never crafts
+        };
+
         for (tx, ty) in flow_targets(grid, x, y) {
-            if sinks.contains(&(tx, ty)) {
+            if sinks.contains(&(tx, ty)) && sink_accepts(grid.get(tx, ty).item, carried) {
                 return true;
             }
-            if is_conveyor(grid, tx, ty) && !visited[grid.idx(tx, ty)] {
-                visited[grid.idx(tx, ty)] = true;
-                queue.push_back((tx, ty));
+            if is_conveyor(grid, tx, ty) {
+                push(grid, &mut visited, &mut queue, (tx, ty), carried);
             }
         }
     }
     false
+}
+
+/// What leaves a cell given what entered it. `None` means the flow stops here.
+fn transform(grid: &Grid, x: usize, y: usize, carried: Item) -> Option<Item> {
+    let cell = grid.get(x, y);
+    if cell.entity != Entity::Assembler {
+        return Some(carried);
+    }
+    // An untagged assembler has no recipe, so it crafts nothing.
+    let ingredient = cell.item.ingredient()?;
+    (ingredient == carried).then_some(cell.item)
+}
+
+/// An untagged sink has no filter and accepts anything; a tagged one accepts
+/// only its own item.
+fn sink_accepts(filter: Item, carried: Item) -> bool {
+    filter == Item::None || filter == carried
+}
+
+fn push(
+    grid: &Grid,
+    visited: &mut [[bool; Item::COUNT]],
+    queue: &mut VecDeque<((usize, usize), Item)>,
+    (x, y): (usize, usize),
+    carried: Item,
+) {
+    let seen = &mut visited[grid.idx(x, y)][carried as usize];
+    if !*seen {
+        *seen = true;
+        queue.push_back(((x, y), carried));
+    }
 }
 
 fn is_conveyor(grid: &Grid, x: usize, y: usize) -> bool {
@@ -223,6 +272,169 @@ mod tests {
             0,
             Cell {
                 entity: Entity::Sink,
+                ..Default::default()
+            },
+        );
+        assert!(!item_reaches_sink(&g));
+    }
+
+    /// Belt a raw plate straight into a sink that wants a crafted item and the
+    /// factory is *not* functional, however well-connected it looks. This is
+    /// the reward hack the check exists to reject.
+    #[test]
+    fn raw_input_belted_to_a_crafted_sink_is_not_functional() {
+        let mut g = Grid::new(5, 1);
+        g.set(
+            0,
+            0,
+            Cell {
+                entity: Entity::Source,
+                item: Item::IronPlate,
+                ..Default::default()
+            },
+        );
+        g.set(1, 0, Cell::belt(Direction::East));
+        g.set(2, 0, Cell::belt(Direction::East));
+        g.set(3, 0, Cell::belt(Direction::East));
+        g.set(
+            4,
+            0,
+            Cell {
+                entity: Entity::Sink,
+                item: Item::IronGear,
+                ..Default::default()
+            },
+        );
+        assert!(!item_reaches_sink(&g));
+    }
+
+    /// The same layout with the assembler actually built does work.
+    #[test]
+    fn assembler_crafting_the_sink_item_is_functional() {
+        let mut g = Grid::new(5, 1);
+        g.set(
+            0,
+            0,
+            Cell {
+                entity: Entity::Source,
+                item: Item::IronPlate,
+                ..Default::default()
+            },
+        );
+        g.set(
+            1,
+            0,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        g.set(
+            2,
+            0,
+            Cell {
+                entity: Entity::Assembler,
+                direction: Direction::East,
+                item: Item::IronGear,
+                ..Default::default()
+            },
+        );
+        g.set(
+            3,
+            0,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        g.set(
+            4,
+            0,
+            Cell {
+                entity: Entity::Sink,
+                item: Item::IronGear,
+                ..Default::default()
+            },
+        );
+        assert!(item_reaches_sink(&g));
+    }
+
+    /// An assembler fed the wrong ingredient never crafts.
+    #[test]
+    fn assembler_fed_wrong_ingredient_is_not_functional() {
+        let mut g = Grid::new(5, 1);
+        g.set(
+            0,
+            0,
+            Cell {
+                entity: Entity::Source,
+                item: Item::CopperPlate, // gears need iron
+                ..Default::default()
+            },
+        );
+        g.set(
+            1,
+            0,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        g.set(
+            2,
+            0,
+            Cell {
+                entity: Entity::Assembler,
+                direction: Direction::East,
+                item: Item::IronGear,
+                ..Default::default()
+            },
+        );
+        g.set(
+            3,
+            0,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        g.set(
+            4,
+            0,
+            Cell {
+                entity: Entity::Sink,
+                item: Item::IronGear,
+                ..Default::default()
+            },
+        );
+        assert!(!item_reaches_sink(&g));
+    }
+
+    /// Delivering the wrong plate to a plate sink is still wrong.
+    #[test]
+    fn mismatched_raw_items_do_not_connect() {
+        let mut g = Grid::new(4, 1);
+        g.set(
+            0,
+            0,
+            Cell {
+                entity: Entity::Source,
+                item: Item::IronPlate,
+                ..Default::default()
+            },
+        );
+        g.set(1, 0, Cell::belt(Direction::East));
+        g.set(2, 0, Cell::belt(Direction::East));
+        g.set(
+            3,
+            0,
+            Cell {
+                entity: Entity::Sink,
+                item: Item::CopperPlate,
                 ..Default::default()
             },
         );

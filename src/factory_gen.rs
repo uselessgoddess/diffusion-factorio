@@ -272,14 +272,10 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     }
     let y = rng.gen_range(0..size);
     let x0 = rng.gen_range(0..=(size - 5));
-    let recipe = *[Item::IronGear, Item::CopperCable, Item::GreenCircuit]
-        .choose(rng)
-        .unwrap();
-    let input_item = match recipe {
-        Item::IronGear => Item::IronPlate,
-        Item::CopperCable => Item::CopperPlate,
-        _ => Item::IronPlate,
-    };
+    let recipe = *Item::craftable().choose(rng).unwrap();
+    let input_item = recipe
+        .ingredient()
+        .expect("every craftable recipe has an ingredient");
 
     let mut grid = Grid::new(size, size);
     grid.set(

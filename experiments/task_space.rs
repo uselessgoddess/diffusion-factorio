@@ -152,7 +152,8 @@ fn main() {
     println!("This is a property of the *data*, not evidence of factory-design skill.\n");
 
     println!("=== 3. Is the `functional` metric item-aware? ===");
-    // Source provides iron, sink accepts copper, belts connect them.
+    // Belt raw iron straight into a sink that wants gears: well-connected, but
+    // it can never deliver. A purely topological check calls this functional.
     let mut g = Grid::new(5, 1);
     g.set(
         0,
@@ -171,15 +172,20 @@ fn main() {
         0,
         Cell {
             entity: Entity::Sink,
-            item: Item::CopperCable,
+            item: Item::IronGear,
             ..Default::default()
         },
     );
     println!("  factory: {}", render(&g).trim_end());
-    println!("  source provides IronPlate, sink accepts CopperCable (impossible).");
+    println!("  source provides IronPlate, sink accepts IronGear, no assembler.");
     println!("  item_reaches_sink() = {}", item_reaches_sink(&g));
-    println!("  => the metric is purely topological; it never compares items.");
-    println!("     The reference guards against exactly this (throughput.rs:205-226,");
-    println!("     'sinks only score their configured item') to stop the agent");
-    println!("     routing raw input straight to the sink.");
+    println!("  => must be false: the flow carries the item, and a gear sink");
+    println!("     rejects raw plates. Before the fix this returned true, which");
+    println!("     rewarded belting raw input straight to the sink instead of");
+    println!("     building the assembler. The reference guards the same hole");
+    println!("     (throughput.rs:205-226, 'sinks only score their configured item').");
+    assert!(
+        !item_reaches_sink(&g),
+        "functional check regressed to being item-blind"
+    );
 }
