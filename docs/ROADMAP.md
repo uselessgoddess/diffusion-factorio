@@ -329,6 +329,15 @@ every task still has exactly one answer, so it needs no `is_ambiguous` handling.
 A 5,000-step run now sees each task ~0.1× instead of ~254×: the model cannot meet
 the same task twice, which is the point.
 
+The gallery makes the counts unnecessary. Four seeds of each, same board size:
+
+![ASSEMBLER_LINE against ASSEMBLER_CHAOS](screenshots/gallery-assembler-chaos.png)
+
+The top row is the same factory four times, slid to another offset — which is the
+`answers: 1` result, drawn. The bottom row is four different factories, because
+the obstacles (grey) are in the conditioning and the belts have to get around
+them. Both rows route end to end and both are pasteable into Factorio.
+
 Two things about writing it are worth keeping, because both produced factories
 that the *functional* simulator happily passed and the *graded* one scored zero,
 and neither was visible in the ASCII render:
