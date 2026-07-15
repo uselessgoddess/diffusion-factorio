@@ -5,6 +5,9 @@ visible and clear**, and that we always have **metrics + validatable inference**
 proving the model is *really learning*. This document is that map: what works
 now, what the known bottlenecks are (ranked), and the concrete next steps.
 
+Analysis of the 5,000-step GPU run, and why RL is still not the next step:
+[`docs/RL_ANALYSIS.md`](RL_ANALYSIS.md).
+
 ## Status: what works today
 
 - **World model** (`src/world.rs`) — 4-channel categorical grid, consistency
