@@ -2,8 +2,17 @@
 
 This answers the questions in [issue #5](https://github.com/uselessgoddess/diffusion-factorio/issues/5)
 against the run that was posted there (wgpu, 11×11, seed 7, 5,000 steps). Every
-number below is re-derivable: either from the `report.html` embedded JSON of that
-run, or by running `cargo run --release --example task_space`.
+number below comes from the `report.html` embedded JSON of that run, or from
+`cargo run --release --example task_space` **as the curriculum stood at the time
+of that run**.
+
+That last qualifier is load-bearing now. Giving the assembler the 3×3 footprint
+Factorio actually enforces (issue #9) cut `assembler_line` from 231 distinct
+tasks to 135, and adding a fifth family changed how often a 5,000-step run sees
+each one. The curriculum figures below are therefore a **historical record of
+what this run trained on**, not a description of what `task_space` prints today;
+where the two differ the text says so. `docs/ROADMAP.md` carries the current
+numbers.
 
 ## TL;DR
 
@@ -61,7 +70,8 @@ Two consequences:
 ## Is the model actually learning, or memorizing?
 
 `cargo run --release --example task_space` measures the curriculum with no model
-involved. At size 11, 200,000 generator seeds per family:
+involved. At size 11, 200,000 generator seeds per family, **as the four families
+stood during this run**:
 
 | lesson | distinct tasks | seen per 5k-step run | ambiguous |
 |---|---:|---:|---:|
@@ -69,6 +79,26 @@ involved. At size 11, 200,000 generator seeds per family:
 | `move_one_item_chaos` | 200,000+ | ~0.2× | 0 |
 | `assembler_line` | 231 | ~173× | 0 |
 | `underground_cross` | 110 | ~364× | 0 |
+
+(Today the same command prints **90** for `assembler_line`, and the per-task
+exposures shift — ~0.6× / ~296× / ~242× — because six families now share the step
+budget, the assembler is 3×3, and vanilla recipes leave a single-source line only
+two of the three recipes to roll. None of it rescues the argument below: 90
+templates seen ~296× each is *more* memorizable than 231 seen ~173×.
+
+Worse, even 90 flatters it. `task_space` now also counts factories with
+translations collapsed, and `assembler_line` has **2** distinct shapes — the two
+recipes it can roll. The other 45× is the same template at another offset, which
+a fully-convolutional denoiser generalizes over for free. The real number is 2,
+and it is 2 on a 19×19 board too. See `docs/ROADMAP.md` bottleneck 0.
+
+And 2 flatters it in turn. `task_space` grew an `answers` column that keys only
+the cells the model is *asked* to fill, and by that count `assembler_line` teaches
+**1**. The recipe rides the assembler cell, which is protected — the model reads
+it out of the conditioning rather than predicting it, so both "shapes" ask for the
+same cells to be filled with the same thing. One picture, drawn ~254× per task in
+a 5,000-step run. That is the strongest form of the argument below, and it is what
+`ASSEMBLER_CHAOS` (197,228 answers) was built to answer.)
 
 **The curriculum splits cleanly in half.**
 
@@ -78,6 +108,12 @@ involved. At size 11, 200,000 generator seeds per family:
 - `assembler_line` / `underground_cross`: a couple hundred templates seen
   hundreds of times each. 1.000 here is **memorization**, and it is what makes
   the aggregate number look perfect.
+
+`assembler_chaos` has since moved the assembler half across the line — 197,228
+answers, each task seen ~0.1× per run, so the model cannot meet one twice.
+`underground_cross` is still on the memorizing side, and this table is the reason
+to expect the aggregate to *drop* when the rest follow: the run that produced the
+numbers in this document was scoring a curriculum half of which it had memorized.
 
 Both halves are worth knowing. The first is a genuine (if modest) result. The
 second is why the aggregate should not be trusted.

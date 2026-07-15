@@ -1,5 +1,7 @@
 use base64::Engine;
 use diffusion_factorio::blueprint::{blueprint_json, blueprint_string, grid_to_blueprint};
+use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::textual::render;
 use diffusion_factorio::world::{Cell, Direction, Entity, Grid, Item, Misc};
 use flate2::read::ZlibDecoder;
 use std::io::Read;
@@ -190,5 +192,242 @@ fn icons_are_capped_at_four() {
     assert_eq!(
         icons.iter().map(|i| i.index).collect::<Vec<_>>(),
         vec![1, 2, 3, 4]
+    );
+}
+
+/// The footprint of the *vanilla prototype*, by the name we export — not by our
+/// own [`Entity::footprint`]. Deriving these from the world model would make the
+/// test below circular: it would prove the exporter agrees with us, when what
+/// matters is that it agrees with Factorio. These are the sizes the game
+/// actually enforces on import.
+fn prototype_size(name: &str) -> (f64, f64) {
+    match name {
+        "assembling-machine-1" => (3.0, 3.0),
+        "splitter" => (2.0, 1.0),
+        "transport-belt" | "underground-belt" | "inserter" | "constant-combinator" => (1.0, 1.0),
+        other => panic!("unknown prototype {other}: give it a size before exporting it"),
+    }
+}
+
+/// Every pair of exported entities whose vanilla footprints occupy the same
+/// ground. Factorio refuses to import such a blueprint outright.
+fn collisions(grid: &Grid) -> Vec<(String, String)> {
+    let bp = grid_to_blueprint(grid, "overlap check").unwrap();
+    let boxes: Vec<_> = bp
+        .blueprint
+        .entities
+        .iter()
+        .map(|e| {
+            let (w, h) = prototype_size(&e.name);
+            let (x, y) = (e.position.x, e.position.y);
+            (
+                e.name.clone(),
+                x - w / 2.0,
+                y - h / 2.0,
+                x + w / 2.0,
+                y + h / 2.0,
+            )
+        })
+        .collect();
+
+    let mut found = Vec::new();
+    for (i, a) in boxes.iter().enumerate() {
+        for b in &boxes[i + 1..] {
+            if a.1 < b.3 && b.1 < a.3 && a.2 < b.4 && b.2 < a.4 {
+                found.push((a.0.clone(), b.0.clone()));
+            }
+        }
+    }
+    found
+}
+
+/// The bug this file now guards, reproduced by hand — and the proof that the
+/// sweep below is looking for something real rather than passing on an empty
+/// set.
+///
+/// This is the shape `gen_assembler_line` used to emit: `S i a i K` on one row,
+/// with the assembler treated as a single cell. The world model said 1×1 and
+/// nothing in the repo disagreed, but `blueprint.rs` has always exported a real
+/// 3×3 `assembling-machine-1`, which swallows the two inserters standing beside
+/// it. The simulator scored these factories as perfectly functional for the
+/// entire life of the lesson; only Factorio could see the problem, and nothing
+/// here ever asked Factorio.
+#[test]
+fn the_old_one_cell_assembler_layout_would_be_rejected_by_factorio() {
+    let mut grid = Grid::new(5, 1);
+    grid.set(
+        0,
+        0,
+        Cell {
+            entity: Entity::Source,
+            item: Item::IronPlate,
+            ..Default::default()
+        },
+    );
+    for x in [1, 3] {
+        grid.set(
+            x,
+            0,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+    }
+    grid.set(
+        2,
+        0,
+        Cell {
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item: Item::IronGear,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        4,
+        0,
+        Cell {
+            entity: Entity::Sink,
+            item: Item::IronGear,
+            ..Default::default()
+        },
+    );
+
+    assert!(
+        !grid.is_consistent(),
+        "the world model must now reject what it used to generate"
+    );
+    assert!(
+        !collisions(&grid).is_empty(),
+        "and the export must be seen to collide, or the sweep below proves nothing"
+    );
+}
+
+/// No factory the curriculum produces may export to a blueprint Factorio would
+/// reject. Sweeping every family means this covers any lesson added later,
+/// whether or not its author thinks about footprints.
+#[test]
+fn no_generated_factory_exports_overlapping_entities() {
+    for &kind in LessonKind::all() {
+        let mut built = 0;
+        for seed in 0..64 {
+            let Some(sample) = generate(kind, 11, seed) else {
+                continue;
+            };
+            built += 1;
+            let found = collisions(&sample.solution);
+            assert!(
+                found.is_empty(),
+                "{} seed {seed}: {found:?} overlap, so Factorio would reject \
+                 this blueprint:\n{}",
+                kind.name(),
+                render(&sample.solution),
+            );
+        }
+        // A family that generates nothing would sail through the loop above and
+        // report success. That is exactly how the first draft of this test
+        // fooled me: shrinking the assembler back to 1×1 left the inserters off
+        // its perimeter, `item_reaches_sink` refused every layout, and the
+        // "no collisions" result was over an empty set.
+        assert!(built > 0, "{} generated no factories at all", kind.name());
+    }
+}
+
+/// Factorio anchors an entity by its centre; we anchor it by its top-left tile.
+/// A machine placed at the grid's own origin must therefore come out centred on
+/// its footprint, which is the arithmetic the bug above got wrong in one file
+/// and right in the other.
+#[test]
+fn an_entity_is_centred_on_the_tiles_it_covers() {
+    let mut grid = Grid::new(4, 4);
+    grid.set(
+        0,
+        0,
+        Cell {
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item: Item::IronGear,
+            ..Default::default()
+        },
+    );
+    let bp = grid_to_blueprint(&grid, "centring").unwrap();
+    let machine = &bp.blueprint.entities[0];
+    assert_eq!(machine.name, "assembling-machine-1");
+    // Anchored at (0,0), covering tiles 0..3 on both axes: the centre is 1.5.
+    assert_eq!((machine.position.x, machine.position.y), (1.5, 1.5));
+}
+
+/// An inserter's exported `direction` must name the tile it **drops into**.
+///
+/// This is the one convention in the format that is a coin-flip you cannot see
+/// yourself losing: get it backwards and every inserter in every blueprint runs
+/// the wrong way, the factory does nothing in-game, and — exactly as with the
+/// footprint bug — our own simulator scores it as perfect, because our simulator
+/// is reading our own convention back to us.
+///
+/// The reference states the rule from both sides and verified it in a live game
+/// (`factorion-mod/server/blueprint.py:12`, "Inserters' blueprint direction
+/// points to their *drop tile*, not pickup", and `factorion.py:587`, "Blueprint
+/// direction = drop tile; model direction = pickup"). It has to flip by 8 on the
+/// way out because its model points inserters at their *pickup*.
+///
+/// Ours points them at their drop already: `sim::flow_targets` pushes an
+/// inserter's flow to `p + d`, and `throughput::accepts_from` has it pick up
+/// from `p - d`. So our direction and Factorio's mean the same thing and we emit
+/// it unflipped. This test is what makes that a decision rather than an
+/// accident — if either convention is ever inverted, one side of it breaks here.
+#[test]
+fn an_inserter_points_at_the_tile_it_drops_into() {
+    // S i K : the inserter takes from the source behind it and feeds the sink
+    // in front of it.
+    let mut grid = Grid::new(3, 1);
+    grid.set(
+        0,
+        0,
+        Cell {
+            entity: Entity::Source,
+            item: Item::IronPlate,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        1,
+        0,
+        Cell {
+            entity: Entity::Inserter,
+            direction: Direction::East,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        2,
+        0,
+        Cell {
+            entity: Entity::Sink,
+            item: Item::IronPlate,
+            ..Default::default()
+        },
+    );
+
+    // Our half of the claim: east means the plate lands to the east.
+    assert!(
+        diffusion_factorio::sim::item_reaches_sink(&grid),
+        "our own model must agree the inserter feeds the sink to its east"
+    );
+
+    // Factorio's half: direction 4 is east, and Factorio reads it as the drop.
+    let bp = grid_to_blueprint(&grid, "inserter facing").unwrap();
+    let inserter = bp
+        .blueprint
+        .entities
+        .iter()
+        .find(|e| e.name == "inserter")
+        .expect("the inserter must be exported");
+    assert_eq!(
+        inserter.direction,
+        Some(4),
+        "an east-dropping inserter must export as direction 4 (east), unflipped"
     );
 }

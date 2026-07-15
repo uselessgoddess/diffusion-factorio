@@ -37,8 +37,8 @@ not *sufficient*. The reference already ran this experiment: **PPO, 45M samples,
 a full throughput engine — and ≈ 0 on assembler lessons**. It did not deliver.
 Meanwhile Best-of-N is already collecting the gain RL is meant to deliver, for
 zero training cost, so RL must now clear "better than 16 forward passes" rather
-than "better than nothing"; one ambiguous family out of five is a base thin enough
-that RL would just memorize "build 3 lines"; and an unverified simulator is a
+than "better than nothing"; the two ambiguous families hold 30 and 7 tasks, a base
+thin enough that RL would just memorize them; and an unverified simulator is a
 reward function RL will *exploit* rather than satisfy. When it happens, the first
 form should be **expert iteration, not PPO**.
 
@@ -72,15 +72,27 @@ measurable without a model at all:
 ```bash
 cargo run --release --example task_space
 ```
+Excerpted — the four families that run trained on, and only the columns this
+section argues from (the tool also prints a `gen/s` rate, which is machine-
+dependent and not reproducible verbatim):
+
 ```
 MOVE_ONE_ITEM          distinct factories:  41857 | distinct tasks:  41857 | ambiguous tasks: 0
 MOVE_ONE_ITEM_CHAOS    distinct factories: 200000 | distinct tasks: 200000 | ambiguous tasks: 0
-ASSEMBLER_LINE         distinct factories:    231 | distinct tasks:    231 | ambiguous tasks: 0
+ASSEMBLER_LINE         distinct factories:     90 | distinct tasks:     90 | ambiguous tasks: 0
 UNDERGROUND_CROSS      distinct factories:    110 | distinct tasks:    110 | ambiguous tasks: 0
 ```
 
 `distinct tasks == distinct factories` in every family: the generator never shows
 two answers to one question. A 30-line BFS beats the model at the task as posed.
+
+(`ASSEMBLER_BANK` §3.3 and `CIRCUIT_LINE` §3.4 came later and are the two that
+break the pattern. `ASSEMBLER_LINE` counted 231 during that run and counts 90
+now: giving the assembler its real 3×3 footprint left a 7×3 line fewer places to
+sit on an 11×11 board (231 → 135), and then vanilla recipes took the recipe roll
+from 3 down to 2, because a one-source line cannot build a two-input circuit
+(135 → 90). The shape of the argument is unchanged, and the family is if anything
+smaller than it was.)
 
 The six small nonzero gaps are all *early* (steps 200–1600) and they are the same
 phenomenon as §1.3: `ambiguous tasks: 0` says the **generator's label** is unique,
@@ -89,8 +101,8 @@ alternative the generator never emits; training closes that to exactly zero and
 keeps it there for the last 2,600 steps. Under `VAL` there is barely room for it
 anyway — `assembler_line` blanks 2 cells out of 121.
 
-Two of those families are also just *small*: `assembler_line` has 231 distinct
-tasks seen ~173× each in a 5k run, `underground_cross` 110 seen ~364×. That is
+Two of those families are also just *small*: `assembler_line` had 231 distinct
+tasks seen ~173× each in that 5k run, `underground_cross` 110 seen ~364×. That is
 memorization scale. `move_one_item` and `..._chaos` are the honest half (~42k and
 200k+ tasks, each seen ~once), so `0.992` is real generalization *there* and
 recall *elsewhere*.
@@ -155,7 +167,7 @@ ones, and why they had to come before RL:
 |---|-----|--------|
 | 1 | Graded throughput | ✅ `src/throughput.rs` |
 | 2 | Best-of-N verified by the simulator | ✅ `src/best_of_n.rs`, `sample --best-of N` |
-| 3 | Curriculum that admits many answers | ✅ `ASSEMBLER_BANK` |
+| 3 | Curriculum that admits many answers | ✅ `ASSEMBLER_BANK`, `CIRCUIT_LINE` |
 | 4 | RL on top of all this | ⛔ **not yet** — §5 |
 
 ---
@@ -188,11 +200,10 @@ Three deliberate departures from `beyarkay/factorion`, each pinned by a test:
   for free; no cycle check needed.
 - **No lanes, and the roadmap was wrong to ask for them.** The reference splits
   each belt tile into left/right lane nodes to model sideloading. That is vacuous
-  *here*: our entities are 1×1, an inserter has exactly one pickup tile, and belt
-  merging already falls out of the per-tile cap. Lanes would be nodes that can
-  never differ. The real limitation is the **world model**, not the throughput
-  port — so "lane-aware throughput" was struck from the roadmap rather than
-  quietly carried forward.
+  *here*: an inserter has exactly one pickup tile, and belt merging already falls
+  out of the per-tile cap. Lanes would be nodes that can never differ. The real
+  limitation is the **world model**, not the throughput port — so "lane-aware
+  throughput" was struck from the roadmap rather than quietly carried forward.
 
 ### 3.2 Best-of-N verified by the simulator (`src/best_of_n.rs`)
 
@@ -249,16 +260,66 @@ cargo run --release --example ambiguity_demo
 ```
 ```
 === the task the model is given (the sink asks for CopperCable) ===
-......S....
-......S....
-......S...K
+...........
+S..........
+...........
+...........
+S..........
+...........
+...........
+S.....K....
+...........
+...........
+...........
+
 === 3 valid answers to it ===
--- delivers 0.860 CopperCable/s --   ......SiAiK
--- delivers 1.720 CopperCable/s --   ......SiAiv / ......SiAiK
--- delivers 2.580 CopperCable/s --   ......SiAiv / ......SiAiv / ......SiAiK
-Same sources, same sink, same recipe: 3 answers spanning 0.860..2.580/s (3.0x).
-Over 20000 seeds, 189 of 189 tasks admit more than one answer.
+
+-- delivers 0.860 CopperCable/s --
+...........
+S..........
+...........
+...........
+S..........
+...........
+..Aaa......
+SiaaaiK....
+..aaa......
+...........
+...........
+
+-- delivers 1.720 CopperCable/s --
+...........
+S..........
+...........
+..Aaa......
+Siaaaiv....
+..aaa.v....
+..Aaa.v....
+SiaaaiK....
+..aaa......
+...........
+...........
+
+-- delivers 2.580 CopperCable/s --
+..Aaa......
+Siaaaiv....
+..aaa.v....
+..Aaa.v....
+Siaaaiv....
+..aaa.v....
+..Aaa.v....
+SiaaaiK....
+..aaa......
+...........
+...........
+
+Same sources, same sink, same recipe: 3 answers spanning 0.860..2.580/s (3.0x). Over 20000 seeds, 30 of 30 tasks admit more than one answer.
 ```
+
+(`A` is an assembler and `a` is one of the eight further tiles it covers — the
+machine is 3×3, as it is in Factorio. Only the anchor stores anything; the body
+tiles are `Empty` but claimed. The inserters stand on the machine's perimeter,
+and the `v` column belts each line's output down into the shared sink.)
 
 (The rates are the output *inserter* capping at 0.86/s, not the assembler:
 CopperCable is 1 plate → 2 cables per 0.5 s, so the machine makes 1.72/s
@@ -276,12 +337,59 @@ build, not the cells a given answer *did* build. Listing only the built cells
 leaves an unbuilt line observed-as-empty — which states the line count in the
 conditioning and silently returns ambiguity to 0. The first version of this
 family had that bug, `ambiguity_demo` (which uses `blank_to_scaffold`, observing
-only the anchors) happily reported 189/189, and `task_space` (which uses `blank`,
-what training actually runs) reported **0**. `task_space` was right. Any new
-ambiguous family must be checked under `blank`, not only `blank_to_scaffold` —
-the test now checks both.
+only the anchors) happily reported every task ambiguous, and `task_space` (which
+uses `blank`, what training actually runs) reported **0**. `task_space` was
+right. Any new ambiguous family must be checked under `blank`, not only
+`blank_to_scaffold` — the test now checks both.
 
-### 3.4 Wired into the metrics
+### 3.4 A curriculum where more is not better (`CIRCUIT_LINE`)
+
+`ASSEMBLER_BANK` proved a task can have many answers. It did not prove the model
+must *think* about which: its answers are ranked by how much was built, so "build
+everything" is the policy. Vanilla recipes bought a family where that policy is
+wrong.
+
+An electronic circuit is 1 iron plate **and** 3 copper cable
+([wiki](https://wiki.factorio.com/Electronic_circuit)). `CIRCUIT_LINE` gives the
+model a copper source, an iron source and a circuit sink, and the answer is how
+many inserters to run from the cable machine into the circuit machine:
+
+```
+  .  .  .  .  .  .  Fe .  .  .  .
+  .  .  .  .  .  .  i  .  .  .  .
+  .  .  C  C  C  i  A  A  A  .  .
+  Cu i  C  C  C  i  A  A  A  i  K
+  .  .  C  C  C  i  A  A  A  .  .
+```
+
+As the viewer draws it — copper into the cable machine, cable and iron
+converging on the circuit machine, circuits out to the sink:
+
+![the circuit line in the gallery](screenshots/gallery-circuit-line.png)
+
+| cable feeds | circuits/s | vs. 1 feed | vs. the feed before |
+|---|---:|---:|---:|
+| 1 | 0.287 | — | — |
+| 2 | 0.573 | 2.0× | **+100%** |
+| 3 | 0.573 | 2.0× | **+0%** |
+
+The third feed is free to build, legal, functional — and worth nothing. One
+inserter carries 0.86 items/s, so two already move the 1.72 cable/s the machine
+makes, and the machine cannot make more because a *single* copper inserter feeds
+it. `functional` calls all three answers perfect. Only the graded score
+separates them, and it does not separate them monotonically in entity count.
+
+That is the first task here whose answer is a **ratio** rather than an amount,
+and the first place where the reward stops rewarding effort. A policy gradient
+on `ASSEMBLER_BANK` alone would learn "more entities"; this family punishes it.
+
+(It is also the smallest family in the curriculum — 11×5 fits an 11×11 board
+exactly 7 ways, so there are only 7 distinct tasks, and this analysis once read
+that as evidence the board was too small. It is not: those 7 tasks are 7
+*offsets* of **3** layouts, one per cable feed, and a 19×19 board yields 135
+offsets of the same 3. See `ROADMAP.md` bottleneck 0.)
+
+### 3.5 Wired into the metrics
 
 `thput` (delivered items/s), `ratio` (delivered ÷ the reference answer's rate)
 and `beat` (count of layouts that *beat* the reference) now appear in the
@@ -325,10 +433,10 @@ argument that the next lever is the **task**, not the training algorithm.
 work, yes or no. Those measure different things, and reading 0.717 as "6× the
 reference" would be nonsense. The genuinely comparable number is our new
 `SCRATCH ratio` (delivered ÷ the reference answer's rate), which is why that
-metric now exists (§3.4). Even then the world models differ (1×1 entities, no
-lanes), so it is a sanity check, not a leaderboard. What *is* directly comparable
-is the **discipline**: blank everything, rebuild from empty. We adopted that from
-them.
+metric now exists (§3.5). Even then the world models differ (no lanes, no
+sideloading, a six-item recipe tree), so it is a sanity check, not a
+leaderboard. What *is* directly comparable is the **discipline**: blank
+everything, rebuild from empty. We adopted that from them.
 
 ---
 
@@ -336,7 +444,7 @@ them.
 
 The roadmap gated RL on three things and **all three are now green**: throughput
 is graded (§3.1), the sampler can be ranked (§3.2), and at least one family
-admits many answers (§3.3). The fourth, unstated one is green too — `distinct =
+admits many answers (§3.3, and now §3.4). The fourth, unstated one is green too — `distinct =
 8.21` per task (§3.2) means there is a real distribution for a policy gradient to
 sharpen, not one memorized answer. That is all *necessary*, and none of it is
 *sufficient*.
@@ -357,10 +465,18 @@ reasons to not do it *next*:
    question RL now has to answer is not "does it work" but "**does it beat 16
    forward passes**" — a much harder bar than the one it faced yesterday, and one
    nobody has made it clear.
-2. **One ambiguous family out of five is a thin base.** RL would optimize
-   throughput on `ASSEMBLER_BANK` — 189 tasks, seen ~169× each. It could reach a
-   perfect score by memorizing "always build 3 lines" without learning one thing
-   about design, and the metric would applaud.
+2. **Two ambiguous families out of six is still a thin base — and they are
+   *tiny*.** RL would optimize throughput on `ASSEMBLER_BANK` (30 tasks, seen
+   ~889× each) and `CIRCUIT_LINE` (**7 tasks, seen ~3,810×**). `CIRCUIT_LINE` at
+   least punishes "build everything" — its third cable feed is worth nothing
+   (§3.4) — so the degenerate policy is no longer free. But 7 tasks is a lookup
+   table, not a distribution: a model could memorize "two feeds" per task without
+   learning one thing about design, and the metric would applaud. This point read
+   "**grid size is the prerequisite**" until the counts were taken with
+   translations collapsed: the two families hold **6** and **3** distinct layouts,
+   unchanged from an 11×11 board to a 19×19 one, because each generator stamps a
+   fixed template and only slides it. **The prerequisite is generators that
+   randomize and route rather than stamp** (`docs/ROADMAP.md` bottleneck 0).
 3. **The simulator has not been parity-checked against Factorio.** RL optimizes
    the reward it is given, exactly and remorselessly. Hand it an unverified
    simulator and it will find that simulator's bugs rather than good factories —
@@ -404,12 +520,17 @@ design — that is "given inputs and outputs, produce the factory". It works 71.
 of the time on 11×11 with one assembler. The gap to "a whole chain" is depth
 (multi-step recipes, intermediate products) and size (above), not a different
 paradigm. `ASSEMBLER_BANK` adds the first taste of the "maximally efficient"
-half by making the count of lines a choice the simulator can rank.
+half by making the count of lines a choice the simulator can rank, and
+`CIRCUIT_LINE` (§3.4) makes that taste a real one: copper plate → cable →
+circuit ← iron plate is a two-level chain that converges, and the efficient
+answer there is a ratio rather than a total.
 
-The honest sequencing: a chain needs multi-input recipes and multi-tile buildings
-in `world.rs` (bottleneck 4) before it can be posed as a task at all. That is
-curriculum work, and it is the same item as §8.2 — which is another reason it,
-not RL, is next.
+The honest sequencing said a chain needs multi-input recipes and multi-tile
+buildings in `world.rs` (bottleneck 4) before it can be posed as a task at all.
+Both landed on this branch, and posing it immediately exposed the next wall:
+`CIRCUIT_LINE` fits an 11×11 grid **7 ways**. Depth is no longer what blocks a
+chain — size is. That is still curriculum work and still the same item as §8.2,
+which is another reason it, not RL, is next.
 
 ## 7. The playground / RCON alternative
 
@@ -443,12 +564,23 @@ Full detail and rationale in [`docs/ROADMAP.md`](ROADMAP.md).
    rest of this list is about earning the right to use it rather than about RL.
    Worth re-running on a full-size checkpoint; the numbers above are from a
    scaled-down one.
-2. **Widen the ambiguous curriculum** — the open half of the work here. Four of
-   five families are still rigid; the bank is 189 memorizable tasks. The next
-   ambiguous family should be at `move_one_item` scale: multi-source/multi-sink,
-   several recipes, tighter obstacle budgets, true 3×3 assemblers and 2×1
-   splitters. This is the single highest-value item on the list — §1.3 says the
-   curriculum is what is capping the model.
+2. **Widen the ambiguous curriculum** — the open half of the work here, and the
+   single highest-value item on the list (§1.3 says the curriculum is what is
+   capping the model). Four of six families are still rigid, and the two that are
+   not are small: the bank is 30 memorizable tasks (189 before the assemblers were
+   3×3 and the recipes were vanilla), and `CIRCUIT_LINE` is **7**.
+
+   This item used to say "**raise the grid size first**". It was wrong, and
+   `task_space` now measures why: collapse translations and the bank holds **6**
+   distinct layouts and `CIRCUIT_LINE` **3** — the same 6 and 3 at 19×19, because
+   every other factor in those counts is an offset, and offsets are what a
+   `same`-padded conv net already handles for free. **Randomize the world first,
+   not the board size.** `MOVE_ONE_ITEM_CHAOS` is the existence proof: obstacles
+   in the conditioning plane, belts routed through them by BFS, 200,000 distinct
+   shapes from 200,000 seeds, at every size. Give the machine lessons the same
+   treatment — random source/machine/sink placement and real routing — and then
+   take the next ambiguous family to that scale: multi-source/multi-sink, several
+   recipes, obstacles it has to design around.
 3. **Fix the schedule** — stop at ~3,000 steps or extend the task; raise batch
    size until the GPU saturates (§1.4). ~40% of a run is currently free money.
 4. **Cheap architecture wins from the reference** — the 520-param tile head.

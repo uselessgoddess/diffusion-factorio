@@ -290,16 +290,21 @@ fn factorio_direction(direction: Direction) -> Option<u8> {
     }
 }
 
+/// Factorio positions an entity by its **centre**; we store it by its top-left
+/// anchor. The centre is therefore the anchor plus half the footprint.
+///
+/// This is derived from [`Entity::footprint`] rather than tabulated here, and
+/// that is deliberate. A second table was what let the two halves disagree in
+/// the first place: the world model called an assembler 1×1 while this file had
+/// always offset it by 1.5 as the real 3×3 machine it is, so every exported
+/// crafting line put the machine on top of its own inserters and Factorio
+/// refused the import (`experiments/overlap_check.rs`). One source of truth
+/// cannot drift from itself.
 fn entity_position(entity: Entity, direction: Direction, x: usize, y: usize) -> Position {
-    let (ox, oy) = match entity {
-        Entity::Assembler => (1.5, 1.5),
-        Entity::Splitter if matches!(direction, Direction::North | Direction::South) => (1.0, 0.5),
-        Entity::Splitter => (0.5, 1.0),
-        _ => (0.5, 0.5),
-    };
+    let (w, h) = entity.footprint(direction);
     Position {
-        x: x as f64 + ox,
-        y: y as f64 + oy,
+        x: x as f64 + w as f64 / 2.0,
+        y: y as f64 + h as f64 / 2.0,
     }
 }
 

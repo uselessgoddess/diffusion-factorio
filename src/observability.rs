@@ -133,8 +133,12 @@ pub fn write_sample_report(path: &Path, entries: &[SampleReportEntry<'_>]) -> Re
             .map(|&step| step as f32 / max_step)
             .collect();
         cards.push_str(&format!(
-            "<section class=\"sample\"><h2>{}</h2><div class=\"panels\">{}{}{}{}{}{}{}</div></section>",
+            "<section class=\"sample\"><h2>{}</h2><div class=\"panels\">{}{}{}</div>\
+             <div class=\"panels\">{}{}{}{}{}{}{}</div></section>",
             escape_html(entry.label),
+            svg_panel("Given", entry.input),
+            svg_panel("Model's factory", entry.prediction),
+            svg_panel("Ground truth", entry.target),
             grid_panel("Masked input", entry.input),
             grid_panel("Prediction", entry.prediction),
             grid_panel("Ground truth", entry.target),
@@ -192,6 +196,7 @@ fn validation_record(r: &ReconReport) -> Value {
         "consistent_rate": r.consistent_rate(),
         "original_functional": r.original_functional,
         "throughput": r.throughput_mean(),
+        "original_throughput": r.original_throughput_mean(),
         "throughput_ratio": r.throughput_ratio_mean(),
         "beat_original": r.beat_original,
         "entity_acc": r.channel_acc(0),
@@ -207,6 +212,16 @@ fn ensure_parent(path: &Path) -> Result<()> {
             .with_context(|| format!("create output directory {}", parent.display()))?;
     }
     Ok(())
+}
+
+/// The picture of a factory, as opposed to [`grid_panel`]'s picture of the
+/// tensor. Machines appear at the size Factorio gives them, so a reader can see
+/// a 3×3 assembler with inserters on its edge rather than decode `A` and `a`.
+fn svg_panel(title: &str, grid: &Grid) -> String {
+    format!(
+        "<div><h3>{title}</h3>{}</div>",
+        crate::viewer::grid_to_svg(grid)
+    )
 }
 
 fn grid_panel(title: &str, grid: &Grid) -> String {
@@ -264,6 +279,8 @@ const TRAINING_REPORT_TEMPLATE: &str = r#"<!doctype html>
  <div class="chart"><h2>Functional / exact / consistent</h2><canvas id="validation"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>functional</span><span><i class="dot" style="background:var(--c)"></i>exact</span><span><i class="dot" style="background:var(--b)"></i>consistent</span></div></div>
  <div class="chart"><h2>Built from scratch (source and sink only)</h2><canvas id="scratch"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>functional</span><span><i class="dot" style="background:var(--c)"></i>exact</span></div></div>
  <div class="chart"><h2>Delivered throughput vs. the taught answer</h2><canvas id="rate"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>in-painting</span><span><i class="dot" style="background:var(--c)"></i>from scratch</span><span><i class="dot" style="background:var(--d)"></i>parity with the generator</span></div><div class="muted">Items/second delivered as a fraction of what the generator's own answer delivers. This is the only curve that can separate two factories that both work — and the only one that can go <b>above</b> 1.0, which means the model out-built what it was taught.</div></div>
+ <div class="chart"><h2>Delivered items / second</h2><canvas id="thput"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>in-painting</span><span><i class="dot" style="background:var(--c)"></i>from scratch</span><span><i class="dot" style="background:var(--b)"></i>the taught answer</span></div><div class="muted">The same quantity the ratio above normalizes, in absolute vanilla items/second. The ratio hides two things this shows: whether a rising ratio came from the model improving or from an easier draw of tasks (the taught-answer curve moves too), and how much of a belt the factory actually fills.</div></div>
+ <div class="chart"><h2>Factories that out-built the taught answer</h2><canvas id="beat"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>in-painting</span><span><i class="dot" style="background:var(--c)"></i>from scratch</span></div><div class="muted">Fraction of reconstructions delivering <b>more</b> items/second than the answer the generator taught. Only an ambiguous lesson family can move this — where a task admits several working answers, this counts the times the model picked a better one than the draw it was shown.</div></div>
 </section>
 <section class="card definitions"><h2>Run parameters and what they control</h2><table id="parameters"></table></section>
 <section class="card definitions"><h2>Latest frozen validation by lesson</h2><table id="lessons"></table></section>
@@ -281,8 +298,10 @@ function lessonTable(id,key){const latest=[...rows].reverse().find(r=>Object.key
 lessonTable('lessons','val_by_lesson');lessonTable('scratch-lessons','val_scratch_by_lesson');
 function chart(id,series,yFixed=false){const c=document.getElementById(id),ctx=c.getContext('2d'),dpr=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=w*dpr;c.height=h*dpr;ctx.scale(dpr,dpr);ctx.strokeStyle='#34414c';ctx.lineWidth=1;for(let i=0;i<5;i++){let y=12+i*(h-30)/4;ctx.beginPath();ctx.moveTo(42,y);ctx.lineTo(w-8,y);ctx.stroke()}const vals=series.flatMap(s=>s.values.map(x=>x[1])).filter(Number.isFinite),max=yFixed?1:vals.reduce((a,v)=>Math.max(a,v),1e-12),min=yFixed?0:vals.reduce((a,v)=>Math.min(a,v),0);for(const s of series){ctx.strokeStyle=s.color;ctx.lineWidth=2;ctx.beginPath();let started=false;for(const [step,v] of s.values){if(!Number.isFinite(v))continue;const x=42+(w-52)*(step-1)/Math.max(1,m.steps-1),y=12+(h-30)*(1-(v-min)/Math.max(1e-12,max-min));started?ctx.lineTo(x,y):ctx.moveTo(x,y);started=true}ctx.stroke()}ctx.fillStyle='#9eabb6';ctx.font='11px system-ui';ctx.fillText(max.toPrecision(3),3,14);ctx.fillText(min.toPrecision(3),3,h-8)}
 const xy=f=>rows.map(r=>[r.step,f(r)]);chart('loss',[{color:'#5ee6a8',values:xy(r=>r.loss)},{color:'#ffcc66',values:xy(r=>r.train.entity_nll)},{color:'#79b8ff',values:xy(r=>r.train.direction_nll)}]);chart('schedule',[{color:'#79b8ff',values:xy(r=>r.lr)}]);chart('speed',[{color:'#5ee6a8',values:xy(r=>r.samples_per_second)}]);chart('train',[{color:'#5ee6a8',values:xy(r=>r.placement_recall)},{color:'#79b8ff',values:xy(r=>r.train.entity_acc)},{color:'#ffcc66',values:xy(r=>r.train.direction_acc)}],true);const vr=rows.filter(r=>r.val);chart('validation',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.functional_rate])},{color:'#79b8ff',values:vr.map(r=>[r.step,r.val.exact_rate])},{color:'#ffcc66',values:vr.map(r=>[r.step,r.val.consistent_rate])}],true);const sr=rows.filter(r=>r.val_scratch);chart('scratch',[{color:'#5ee6a8',values:sr.map(r=>[r.step,r.val_scratch.functional_rate])},{color:'#79b8ff',values:sr.map(r=>[r.step,r.val_scratch.exact_rate])}],true);chart('rate',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.throughput_ratio])},{color:'#79b8ff',values:sr.map(r=>[r.step,r.val_scratch.throughput_ratio])},{color:'#ff7b9c',values:rows.map(r=>[r.step,1])}]);
+chart('thput',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.throughput])},{color:'#79b8ff',values:sr.map(r=>[r.step,r.val_scratch.throughput])},{color:'#ffcc66',values:vr.map(r=>[r.step,r.val.original_throughput])}]);
+const frac=(v,k)=>v.n?v[k]/v.n:0;chart('beat',[{color:'#5ee6a8',values:vr.map(r=>[r.step,frac(r.val,'beat_original')])},{color:'#79b8ff',values:sr.map(r=>[r.step,frac(r.val_scratch,'beat_original')])}],true);
 </script></main></body></html>"#;
 
 const SAMPLE_REPORT_TEMPLATE: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>diffusion-factorio reconstruction diagnostics</title><style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101418;color:#e8edf2;font:14px/1.4 system-ui,sans-serif}main{max-width:1500px;margin:auto;padding:28px}h1{margin:0}.intro{color:#9eabb6;margin:5px 0 22px}.sample{background:#182027;border:1px solid #293740;border-radius:10px;padding:16px;margin:14px 0}.sample h2{margin:0 0 12px}.panels{display:flex;gap:18px;flex-wrap:wrap}.panels h3{font-size:12px;color:#aeb9c2;margin:0 0 6px}.grid{display:grid;grid-template-columns:repeat(var(--w),18px);grid-auto-rows:18px;gap:1px;background:#0b0e11;padding:4px;border-radius:4px}.grid i{display:block;min-width:18px;min-height:18px}.glyphs i{font:14px/18px ui-monospace,monospace;text-align:center;background:#26313a;font-style:normal}
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101418;color:#e8edf2;font:14px/1.4 system-ui,sans-serif}main{max-width:1500px;margin:auto;padding:28px}h1{margin:0}.intro{color:#9eabb6;margin:5px 0 22px}.sample{background:#182027;border:1px solid #293740;border-radius:10px;padding:16px;margin:14px 0}.sample h2{margin:0 0 12px}.panels{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;margin-bottom:16px}.panels:last-child{margin-bottom:0}.panels h3{font-size:12px;color:#aeb9c2;margin:0 0 6px}.factory{display:block;width:330px;max-width:100%;height:auto;border-radius:5px}.grid{display:grid;grid-template-columns:repeat(var(--w),18px);grid-auto-rows:18px;gap:1px;background:#0b0e11;padding:4px;border-radius:4px}.grid i{display:block;min-width:18px;min-height:18px}.glyphs i{font:14px/18px ui-monospace,monospace;text-align:center;background:#26313a;font-style:normal}
 </style></head><body><main><h1>Reconstruction diagnostics</h1><div class="intro">Confidence and normalized entropy are captured when each cell is revealed. Error excludes observed conditioning cells.</div>__SAMPLE_CARDS__</main></body></html>"#;

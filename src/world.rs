@@ -18,6 +18,14 @@
 //!     channel that never encodes where entities should go.
 //!   * The 89-item catalogue is trimmed to a small, extensible set — enough to
 //!     exercise every output head without drowning rare classes.
+//!   * **Stamping a multi-tile entity into every tile it covers.** The reference
+//!     writes an assembler into all nine of its cells, which is natural for a PPO
+//!     policy whose action is the single atomic "place a machine at (x, y)" — the
+//!     env stamps, the agent never sees the nine. Our model emits every cell
+//!     independently within a reveal round, so nine cells agreeing is luck, not
+//!     learning. We store a machine **only at its top-left anchor** and leave the
+//!     other tiles `Empty` but claimed. See [`Grid::anchor_at`] and
+//!     [`Grid::footprints_are_legal`].
 
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +83,47 @@ impl Entity {
     pub fn is_directional(self) -> bool {
         !matches!(self, Entity::Empty | Entity::Source | Entity::Sink)
     }
+
+    /// Footprint in tiles, at the entity's default (north/south) facing.
+    ///
+    /// These are the vanilla prototype sizes, and they are not decoration.
+    /// `blueprint.rs` has always anchored a real 3×3 `assembling-machine-1` and
+    /// a real 2×1 `splitter` at the cell the world model called 1×1, so every
+    /// blueprint we exported for a lesson containing either one placed entities
+    /// on top of each other and Factorio refused to import it. The size lives
+    /// here, once, so the simulator and the exporter cannot disagree about it.
+    ///
+    /// `Source`/`Sink` are our own anchors rather than vanilla prototypes, and
+    /// stay 1×1: they mark where the factory's input and output *are*, and give
+    /// the model nothing to lay out.
+    pub fn size(self) -> (usize, usize) {
+        match self {
+            Entity::Assembler => (3, 3),
+            Entity::Splitter => (2, 1),
+            _ => (1, 1),
+        }
+    }
+
+    /// Footprint `(width, height)` once rotated to face `direction`.
+    ///
+    /// A square footprint ignores facing — a 3×3 assembler covers the same nine
+    /// tiles whichever way it points, and only its recipe I/O cares about the
+    /// direction. A 2×1 splitter laid out east-west becomes 1×2 when it faces
+    /// east or west. The reference guards the same case in `entity_tiles`, which
+    /// skips the swap when `width == height`.
+    pub fn footprint(self, direction: Direction) -> (usize, usize) {
+        let (w, h) = self.size();
+        match direction {
+            Direction::East | Direction::West if w != h => (h, w),
+            _ => (w, h),
+        }
+    }
 }
+
+/// Longest side of any [`Entity::size`]. Bounds how far up and left of a tile
+/// an anchor covering it can sit, which is what makes [`Grid::anchor_at`] a
+/// constant-time scan instead of a sweep of the whole grid.
+pub const MAX_FOOTPRINT: usize = 3;
 
 /// Facing. `None` is used by non-directional cells (empty / source / sink) so
 /// the direction channel is unambiguous for them.
@@ -130,13 +178,22 @@ impl Direction {
 /// see [`ASSEMBLER_CRAFTING_SPEED`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Recipe {
-    pub ingredient: Item,
-    /// Units of `ingredient` consumed per craft.
-    pub ingredient_qty: f64,
+    /// What one craft consumes. A machine runs at the rate of its **scarcest**
+    /// input, so an assembler drowning in iron and starved of cable makes
+    /// nothing — which is the whole reason a recipe is a list and not a field.
+    pub ingredients: &'static [Ingredient],
     /// Units of the product yielded per craft.
     pub output_qty: f64,
     /// Seconds per craft at crafting speed 1.
     pub crafting_time: f64,
+}
+
+/// One input to a recipe.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ingredient {
+    pub item: Item,
+    /// Units consumed per craft.
+    pub qty: f64,
 }
 
 impl Recipe {
@@ -151,9 +208,23 @@ impl Recipe {
         self.crafts_per_second() * self.output_qty
     }
 
-    /// Items per second of `ingredient` needed to keep the machine saturated.
-    pub fn max_input_rate(&self) -> f64 {
-        self.crafts_per_second() * self.ingredient_qty
+    /// Items per second of `item` needed to keep the machine saturated, or `0`
+    /// if this recipe does not use it.
+    pub fn max_input_rate(&self, item: Item) -> f64 {
+        self.crafts_per_second() * self.qty_of(item)
+    }
+
+    /// Units of `item` one craft consumes; `0` when the recipe does not use it.
+    pub fn qty_of(&self, item: Item) -> f64 {
+        self.ingredients
+            .iter()
+            .find(|i| i.item == item)
+            .map_or(0.0, |i| i.qty)
+    }
+
+    /// Does this recipe need more than one distinct input?
+    pub fn is_multi_input(&self) -> bool {
+        self.ingredients.len() > 1
     }
 }
 
@@ -193,16 +264,14 @@ impl Item {
         })
     }
 
-    /// The ingredient an assembler must be fed to craft this item, or `None`
-    /// for a raw item that no recipe produces.
+    /// Everything an assembler must be fed to craft this item. Empty for a raw
+    /// item that no recipe produces.
     ///
-    /// Single-ingredient simplification of the vanilla recipes (real green
-    /// circuits also need copper cable); it mirrors the 1×1 assembler we use in
-    /// place of the reference's 3×3. This is the one place the recipe graph is
-    /// defined — both the lesson generator and the simulator read it, so a
-    /// factory can never be generated that the simulator would call broken.
-    pub fn ingredient(self) -> Option<Self> {
-        self.recipe().map(|r| r.ingredient)
+    /// This is the one place the recipe graph is defined — both the lesson
+    /// generator and the simulator read it, so a factory can never be generated
+    /// that the simulator would call broken.
+    pub fn ingredients(self) -> &'static [Ingredient] {
+        self.recipe().map_or(&[], |r| r.ingredients)
     }
 
     /// The recipe that produces this item, or `None` for a raw item.
@@ -214,33 +283,53 @@ impl Item {
     /// items/s depending on the recipe. A model that only knows "connected"
     /// cannot see that difference.
     ///
-    /// The one deliberate departure from vanilla is that every recipe here has a
-    /// *single* ingredient. Real electronic circuits need 3 copper cable **and**
-    /// 1 iron plate; ours need only the plate. That keeps the 1×1 assembler and
-    /// the single-item belt abstraction coherent — a multi-ingredient recipe
-    /// would need two input belts converging, which the world model cannot yet
-    /// express. It is a known gap, not an oversight (see `docs/ROADMAP.md`).
+    /// These are the vanilla recipes as the wiki states them, including the
+    /// electronic circuit's **two** inputs. Until the 3×3 footprint landed they
+    /// could not be: a 1×1 machine has one tile in front and one behind, so a
+    /// second input had nowhere to go, and every recipe here was forced down to a
+    /// single ingredient. A 3×3 machine has twelve perimeter slots
+    /// ([`Grid::perimeter`]) and can be fed from as many sides as a recipe needs,
+    /// so the simplification is gone.
+    ///
+    /// A two-input recipe is a different *kind* of problem, not a bigger one. A
+    /// single-input line is a path: connect A to B. A circuit needs two paths
+    /// that arrive at the same machine and neither may be sacrificed for the
+    /// other, and — because a craft consumes 3 cable per 1 plate — feeding them
+    /// equally is wrong. The layout that scores well has to be unbalanced on
+    /// purpose, which nothing in a connectivity metric can express.
     pub fn recipe(self) -> Option<Recipe> {
-        // 2 iron plate -> 1 iron gear wheel, 0.5 s (vanilla).
-        // 1 copper plate -> 2 copper cable, 0.5 s (vanilla).
-        // 1 iron plate -> 1 electronic circuit, 0.5 s (vanilla minus the copper
-        // cable ingredient, per the single-ingredient simplification above).
         Some(match self {
+            // 2 iron plate -> 1 iron gear wheel, 0.5 s.
             Self::IronGear => Recipe {
-                ingredient: Self::IronPlate,
-                ingredient_qty: 2.0,
+                ingredients: &[Ingredient {
+                    item: Self::IronPlate,
+                    qty: 2.0,
+                }],
                 output_qty: 1.0,
                 crafting_time: 0.5,
             },
+            // 1 copper plate -> 2 copper cable, 0.5 s.
             Self::CopperCable => Recipe {
-                ingredient: Self::CopperPlate,
-                ingredient_qty: 1.0,
+                ingredients: &[Ingredient {
+                    item: Self::CopperPlate,
+                    qty: 1.0,
+                }],
                 output_qty: 2.0,
                 crafting_time: 0.5,
             },
+            // 1 iron plate + 3 copper cable -> 1 electronic circuit, 0.5 s.
+            // https://wiki.factorio.com/Electronic_circuit
             Self::GreenCircuit => Recipe {
-                ingredient: Self::IronPlate,
-                ingredient_qty: 1.0,
+                ingredients: &[
+                    Ingredient {
+                        item: Self::IronPlate,
+                        qty: 1.0,
+                    },
+                    Ingredient {
+                        item: Self::CopperCable,
+                        qty: 3.0,
+                    },
+                ],
                 output_qty: 1.0,
                 crafting_time: 0.5,
             },
@@ -251,6 +340,16 @@ impl Item {
     /// Items an assembler can be given as a recipe.
     pub fn craftable() -> [Self; 3] {
         [Self::IronGear, Self::CopperCable, Self::GreenCircuit]
+    }
+
+    /// The craftables a single feed line can satisfy. The lessons that lay one
+    /// source into one machine can only teach these; a two-input recipe needs a
+    /// lesson that builds two feeds ([`crate::factory_gen::LessonKind`]).
+    pub fn single_input_craftable() -> Vec<Self> {
+        Self::craftable()
+            .into_iter()
+            .filter(|i| i.recipe().is_some_and(|r| !r.is_multi_input()))
+            .collect()
     }
 }
 
@@ -400,8 +499,252 @@ impl Grid {
         self.cells.is_empty()
     }
 
-    /// All cells consistent -> a well-formed factory.
+    /// The tiles covered by the entity anchored at `(x, y)`, which is its
+    /// top-left cell. Tiles that fall off the grid are still yielded, so a
+    /// caller can tell "hangs over the edge" from "fits" — see
+    /// [`Self::footprints_are_legal`].
+    ///
+    /// An empty cell reports itself, since [`Entity::Empty`] is 1×1. Ask
+    /// [`Cell::is_empty`] first if that distinction matters.
+    pub fn footprint_at(&self, x: usize, y: usize) -> Vec<(i32, i32)> {
+        let cell = self.get(x, y);
+        let (w, h) = cell.entity.footprint(cell.direction);
+        let (x, y) = (x as i32, y as i32);
+        (0..h as i32)
+            .flat_map(|dy| (0..w as i32).map(move |dx| (x + dx, y + dy)))
+            .collect()
+    }
+
+    /// The anchor of the entity covering `(x, y)`, or `None` if none does.
+    ///
+    /// For a 1×1 entity this is `(x, y)` itself; for one of the eight tiles
+    /// around a 3×3 assembler's anchor it is that anchor — the only cell that
+    /// stores the entity at all. **Every read of the form "what is standing on
+    /// this tile?" has to come through here.** [`Self::get`] answers "what is
+    /// *stored* in this cell", and for eight ninths of an assembler the honest
+    /// answer to that is `Empty`, which is exactly the hole a consumer must not
+    /// fall into.
+    ///
+    /// On a grid whose footprints overlap (which [`Self::is_consistent`]
+    /// rejects) this reports the first anchor in scan order.
+    pub fn anchor_at(&self, x: usize, y: usize) -> Option<(usize, usize)> {
+        let first = |v: usize| v.saturating_sub(MAX_FOOTPRINT - 1);
+        (first(y)..=y)
+            .flat_map(|ay| (first(x)..=x).map(move |ax| (ax, ay)))
+            .find(|&(ax, ay)| {
+                !self.get(ax, ay).is_empty()
+                    && self.footprint_at(ax, ay).contains(&(x as i32, y as i32))
+            })
+    }
+
+    /// Tiles orthogonally adjacent to the footprint of the entity anchored at
+    /// `(x, y)`: every slot an inserter could stand in to load or unload it.
+    ///
+    /// A 1×1 entity has four. A 3×3 assembler has twelve — its 16-tile ring
+    /// minus the four diagonal corners, which touch it at a point and cannot
+    /// reach it. Those twelve slots are the reason multi-tile machines are worth
+    /// the trouble: a 1×1 machine has room for one input and one output, so a
+    /// recipe needing two different items delivered can only be expressed once
+    /// the machine has a perimeter. The reference enumerates the same ring as
+    /// `PERIM_SLOTS`.
+    pub fn perimeter(&self, x: usize, y: usize) -> Vec<(usize, usize)> {
+        let cell = self.get(x, y);
+        let (w, h) = cell.entity.footprint(cell.direction);
+        let (x, y, w, h) = (x as i32, y as i32, w as i32, h as i32);
+        let sides = (0..h).flat_map(|dy| [(x - 1, y + dy), (x + w, y + dy)]);
+        let ends = (0..w).flat_map(|dx| [(x + dx, y - 1), (x + dx, y + h)]);
+        sides
+            .chain(ends)
+            .filter(|&(nx, ny)| self.in_bounds(nx, ny))
+            .map(|(nx, ny)| (nx as usize, ny as usize))
+            .collect()
+    }
+
+    /// Do the footprints tile the grid legally? Every entity must fit on the
+    /// grid, must not cover an obstacle, and must not overlap another entity.
+    ///
+    /// This is the first rule in this file that a single cell cannot answer, and
+    /// it exists because [`Entity::size`] made an assembler 3×3. The eight cells
+    /// around its anchor are *stored* `Empty`, but they are not free, and a
+    /// factory that belts a lane straight through the middle of a machine is not
+    /// a factory — it is a grid that renders plausibly and imports as nothing.
+    ///
+    /// Storing the entity only at its anchor, rather than stamping it across all
+    /// nine cells the way the reference does, is what keeps this cheap for a
+    /// diffusion model: the model commits cells independently within a reveal
+    /// round, so "these nine cells must all agree" is a constraint it can only
+    /// satisfy by luck, while "leave the machine's shadow alone" is a constraint
+    /// whose correct answer is the `Empty` it already predicts everywhere else.
+    pub fn footprints_are_legal(&self) -> bool {
+        let mut claimed = vec![false; self.len()];
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if self.get(x, y).is_empty() {
+                    continue;
+                }
+                for (tx, ty) in self.footprint_at(x, y) {
+                    if !self.in_bounds(tx, ty) {
+                        return false;
+                    }
+                    let i = self.idx(tx as usize, ty as usize);
+                    if self.obstacle[i] || claimed[i] {
+                        return false;
+                    }
+                    claimed[i] = true;
+                }
+            }
+        }
+        true
+    }
+
+    /// Every cell consistent *and* every footprint legal -> a well-formed
+    /// factory.
     pub fn is_consistent(&self) -> bool {
-        self.cells.iter().all(Cell::is_consistent)
+        self.cells.iter().all(Cell::is_consistent) && self.footprints_are_legal()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assembler() -> Cell {
+        Cell {
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item: Item::IronGear,
+            misc: Misc::None,
+        }
+    }
+
+    fn splitter(direction: Direction) -> Cell {
+        Cell {
+            entity: Entity::Splitter,
+            direction,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_square_footprint_ignores_facing_and_a_splitter_rotates() {
+        for d in [
+            Direction::North,
+            Direction::East,
+            Direction::South,
+            Direction::West,
+        ] {
+            assert_eq!(Entity::Assembler.footprint(d), (3, 3));
+            assert_eq!(Entity::TransportBelt.footprint(d), (1, 1));
+        }
+        assert_eq!(Entity::Splitter.footprint(Direction::North), (2, 1));
+        assert_eq!(Entity::Splitter.footprint(Direction::South), (2, 1));
+        assert_eq!(Entity::Splitter.footprint(Direction::East), (1, 2));
+        assert_eq!(Entity::Splitter.footprint(Direction::West), (1, 2));
+    }
+
+    /// The whole point of the anchor representation: eight of an assembler's
+    /// nine cells are stored `Empty`, and every consumer must still see a
+    /// machine standing on them.
+    #[test]
+    fn body_tiles_resolve_to_the_anchor_though_they_read_as_empty() {
+        let mut g = Grid::new(6, 6);
+        g.set(1, 1, assembler());
+        for y in 1..4 {
+            for x in 1..4 {
+                assert!(
+                    (x, y) == (1, 1) || g.get(x, y).is_empty(),
+                    "({x},{y}) should be stored empty"
+                );
+                assert_eq!(g.anchor_at(x, y), Some((1, 1)), "({x},{y}) is the machine");
+            }
+        }
+        assert_eq!(
+            g.anchor_at(4, 4),
+            None,
+            "diagonal corner is outside the 3×3"
+        );
+        assert_eq!(g.anchor_at(0, 1), None, "left of the anchor is free");
+    }
+
+    #[test]
+    fn a_rotated_splitter_covers_the_tile_below_not_beside() {
+        let mut g = Grid::new(4, 4);
+        g.set(1, 1, splitter(Direction::East));
+        assert_eq!(g.anchor_at(1, 2), Some((1, 1)));
+        assert_eq!(g.anchor_at(2, 1), None);
+    }
+
+    /// Twelve slots, not sixteen: the diagonal corners touch the machine at a
+    /// point, and an inserter cannot reach through a point.
+    #[test]
+    fn a_machine_perimeter_is_the_ring_minus_its_corners() {
+        let mut g = Grid::new(9, 9);
+        g.set(3, 3, assembler());
+        let ring = g.perimeter(3, 3);
+        assert_eq!(ring.len(), 12);
+        for corner in [(2, 2), (6, 2), (2, 6), (6, 6)] {
+            assert!(
+                !ring.contains(&corner),
+                "{corner:?} only touches diagonally"
+            );
+        }
+        for slot in [(2, 3), (2, 4), (2, 5), (6, 3), (3, 2), (4, 6)] {
+            assert!(ring.contains(&slot), "{slot:?} should be a loading slot");
+        }
+
+        g.set(0, 0, Cell::belt(Direction::East));
+        assert_eq!(
+            g.perimeter(0, 0).len(),
+            2,
+            "a corner cell has two neighbours"
+        );
+    }
+
+    /// The bug this representation exists to fix. Before footprints, this grid
+    /// was "consistent" — every cell was individually well-formed — and it
+    /// exported to a blueprint whose belt sat inside the machine.
+    #[test]
+    fn an_entity_in_a_machines_shadow_is_not_a_well_formed_factory() {
+        let mut g = Grid::new(6, 6);
+        g.set(1, 1, assembler());
+        assert!(g.is_consistent(), "a lone assembler with room is fine");
+
+        g.set(2, 2, Cell::belt(Direction::East));
+        assert!(
+            g.cells.iter().all(Cell::is_consistent),
+            "every cell is still individually legal — only the grid knows better"
+        );
+        assert!(!g.is_consistent(), "the belt is inside the assembler");
+    }
+
+    #[test]
+    fn a_footprint_may_not_hang_off_the_grid() {
+        let mut g = Grid::new(6, 6);
+        g.set(3, 3, assembler());
+        assert!(g.is_consistent(), "3..6 is the last column that fits");
+        g.set(3, 3, Cell::default());
+        g.set(4, 3, assembler());
+        assert!(!g.is_consistent(), "the machine's right column is off-grid");
+    }
+
+    /// Obstacles are checked against the whole footprint, not just the anchor:
+    /// a machine placed one tile clear of a rock still has eight other cells.
+    #[test]
+    fn a_footprint_may_not_cover_an_obstacle() {
+        let mut g = Grid::new(6, 6);
+        g.set(1, 1, assembler());
+        g.set_obstacle(3, 3, true);
+        assert!(!g.is_consistent());
+    }
+
+    #[test]
+    fn two_machines_may_not_overlap() {
+        let mut g = Grid::new(8, 8);
+        g.set(1, 1, assembler());
+        g.set(4, 1, assembler());
+        assert!(g.is_consistent(), "abutting machines share no tile");
+        g.set(4, 1, Cell::default());
+        g.set(3, 1, assembler());
+        assert!(!g.is_consistent(), "they share the column at x=3");
     }
 }

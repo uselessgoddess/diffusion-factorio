@@ -211,4 +211,49 @@ mod tests {
             assert_eq!(logits.dims(), [batch, VOCAB[c], h, w]);
         }
     }
+
+    /// Raising the grid size is a config change, not an architecture change.
+    ///
+    /// Nothing here is sized by the board: the embeddings are per-token, the
+    /// tower is convolutions with `same` padding, the global context is a mean
+    /// over whatever spatial extent it is handed, and the heads are 1x1. So one
+    /// set of weights runs at any size — which is what makes the curriculum's
+    /// grid-size bottleneck (`docs/ROADMAP.md`) cheap to unblock, and what lets
+    /// a checkpoint trained small be fine-tuned on a bigger board.
+    #[test]
+    fn one_set_of_weights_runs_at_any_grid_size() {
+        type B = CpuBackend;
+        let device = Default::default();
+        let model = DenoiserConfig::new()
+            .with_hidden(16)
+            .with_blocks(2)
+            .init::<B>(&device);
+
+        for size in [7, 11, 19, 24] {
+            let tokens = Tensor::<B, 4, Int>::zeros([1, N_CHANNELS, size, size], &device);
+            let obstacle = Tensor::<B, 4>::zeros([1, 1, size, size], &device);
+            let t = Tensor::<B, 1>::from_floats([0.5], &device);
+            let out = model.forward(tokens, obstacle, t);
+            for (c, logits) in out.iter().enumerate() {
+                assert_eq!(logits.dims(), [1, VOCAB[c], size, size], "at size {size}");
+            }
+        }
+    }
+
+    /// The tower must be able to *see* across the board, or a bigger grid buys
+    /// task space the model cannot use. Each `ResBlock` is two 3x3 convs (+/-2)
+    /// on top of the 3x3 stem (+/-1), so `blocks` blocks reach `2*blocks + 1`
+    /// cells. The default 6 reaches 13 — a 27x27 window, comfortably over the
+    /// sizes above. Past that, a cell stops being able to condition on the far
+    /// corner directly and only the mean-pooled global context connects them.
+    #[test]
+    fn the_default_tower_can_see_across_the_grids_we_train_on() {
+        let reach = 2 * DenoiserConfig::new().blocks + 1;
+        assert_eq!(reach, 13);
+        assert!(
+            2 * reach + 1 >= 19,
+            "a {}-cell reach cannot span a 19-wide board",
+            reach
+        );
+    }
 }

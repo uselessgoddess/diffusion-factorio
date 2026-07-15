@@ -76,6 +76,13 @@ impl ReconReport {
     pub fn throughput_mean(&self) -> f64 {
         div(self.throughput, self.n_factories)
     }
+    /// Mean items/second delivered by the *generator's own* answers — the
+    /// baseline [`Self::throughput_ratio_mean`] divides by. Reported alongside
+    /// the ratio because the ratio alone cannot say whether it moved because
+    /// the model improved or because the tasks got easier.
+    pub fn original_throughput_mean(&self) -> f64 {
+        div(self.original_throughput, self.n_factories)
+    }
     /// Mean fraction of the generator's own delivered rate that the model
     /// achieved. 1.0 = matched the taught answer; >1.0 = beat it.
     pub fn throughput_ratio_mean(&self) -> f64 {

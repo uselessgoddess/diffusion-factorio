@@ -25,10 +25,17 @@
 //!   other paths still score. This needs no cycle check at all — it is what
 //!   Kahn's algorithm already does.
 //! * **No lanes.** The reference splits every belt tile into a left/right lane
-//!   node to model sideloading. Our world model has no lanes and 1×1 entities,
-//!   so lane-awareness is vacuous here: an inserter has exactly one pickup tile,
-//!   and belt merging is handled by the per-tile cap. This is a limitation of
-//!   the world model, not of the port (`docs/ROADMAP.md`).
+//!   node to model sideloading. Our world model has no lanes, so lane-awareness
+//!   is vacuous here: an inserter has exactly one pickup tile, and belt merging
+//!   is handled by the per-tile cap. This is a limitation of the world model,
+//!   not of the port (`docs/ROADMAP.md`).
+//!
+//! Machines are multi-tile, and a machine is **one node** however many tiles it
+//! covers. Every tile this module derives for itself — an inserter's pickup —
+//! goes through [`Grid::anchor_at`] before it is compared to anything, and
+//! [`flow_targets`] only ever hands back anchors. Skipping that would give a 3×3
+//! assembler three successors where it has one, and the even fan-out split would
+//! silently divide its output by three.
 //!
 //! Rates are vanilla items/second. The score is a **per-sink mean, not a sum**:
 //! two sinks fed 15/s each score 15.0, not 30.0.
@@ -226,14 +233,21 @@ fn build_graph(grid: &Grid) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
 ///
 /// [`flow_targets`] says who offers; this says who takes. Splitting the two is
 /// what keeps an inserter from magically grabbing off a belt beside it.
+///
+/// Both `p` and `q` are anchors, because that is all [`flow_targets`] ever
+/// names. Any tile this function derives itself — an inserter's pickup, say —
+/// is a raw tile and has to be resolved before it can be compared to one.
 fn accepts_from(grid: &Grid, (qx, qy): (usize, usize), (px, py): (usize, usize)) -> bool {
     let q = grid.get(qx, qy);
     match q.entity {
         Entity::Sink => true,
-        // An inserter's hand reaches exactly one tile: the one behind it.
+        // An inserter's hand reaches exactly one tile: the one behind it. That
+        // tile may be any of a machine's nine, so it is the *entity* standing
+        // there that has to match, not the tile's own coordinates.
         Entity::Inserter => {
             let (dx, dy) = q.direction.delta();
-            (px as i32, py as i32) == (qx as i32 - dx, qy as i32 - dy)
+            let (bx, by) = (qx as i32 - dx, qy as i32 - dy);
+            grid.in_bounds(bx, by) && grid.anchor_at(bx as usize, by as usize) == Some((px, py))
         }
         // A machine is loaded by an inserter swinging into it — a belt running
         // past its wall delivers nothing. A source anchor stands in for an
@@ -258,14 +272,29 @@ fn transform(grid: &Grid, idx: usize, input: &Flow) -> Flow {
         Entity::Assembler => {
             let mut out = NO_FLOW;
             if let Some(recipe) = cell.item.recipe() {
-                let supplied = input[recipe.ingredient as usize] / recipe.ingredient_qty;
+                // A machine runs at the rate of its *scarcest* input. An
+                // assembler swimming in iron plate and starved of copper cable
+                // makes nothing, so the min is the craft rate — not the sum, and
+                // not the rate of whichever input the belt happens to favour.
+                let supplied = recipe
+                    .ingredients
+                    .iter()
+                    .map(|i| input[i.item as usize] / i.qty)
+                    .fold(f64::INFINITY, f64::min);
                 let crafts = supplied.min(recipe.crafts_per_second());
                 out[cell.item as usize] = crafts * recipe.output_qty;
             }
             out
         }
-        Entity::TransportBelt | Entity::UndergroundBelt | Entity::Splitter => {
-            clamp_total(input, BELT_RATE)
+        Entity::TransportBelt | Entity::UndergroundBelt => clamp_total(input, BELT_RATE),
+        // A splitter is two belt tiles wide and carries two belts, which is the
+        // whole point of it: one belt in leaves each output half full, two belts
+        // in leave each output full. Capped at a single `BELT_RATE` it throttled
+        // to half of what a plain pair of belts would have carried, and the
+        // model was right to avoid it.
+        Entity::Splitter => {
+            let (w, h) = cell.entity.footprint(cell.direction);
+            clamp_total(input, BELT_RATE * (w * h) as f64)
         }
         Entity::Inserter => clamp_total(input, INSERTER_RATE),
         Entity::Sink => *input,
@@ -363,15 +392,25 @@ mod tests {
         }
     }
 
-    /// `S i a i K`: the assembler_line lesson, which the model already solves
-    /// with exact=0.99 — and which the binary metric scores 1.0 either way.
+    /// The assembler_line lesson, which the model already solves with
+    /// exact=0.99 — and which the binary metric scores 1.0 either way:
+    ///
+    /// ```text
+    ///     . . A A A . .
+    ///     S i A A A i K
+    ///     . . A A A . .
+    /// ```
+    ///
+    /// The machine is anchored at (2, 0) and covers nine tiles, so the
+    /// inserters swing at its west and east walls. Written as a 1×1 `S i a i K`
+    /// row this fit in 5×1, and exported to a blueprint Factorio would not load.
     fn assembler_line(recipe: Item, ingredient: Item) -> Grid {
-        let mut g = Grid::new(5, 1);
-        g.set(0, 0, anchor(Entity::Source, ingredient));
-        g.set(1, 0, inserter(Direction::East));
+        let mut g = Grid::new(7, 3);
+        g.set(0, 1, anchor(Entity::Source, ingredient));
+        g.set(1, 1, inserter(Direction::East));
         g.set(2, 0, assembler(recipe));
-        g.set(3, 0, inserter(Direction::East));
-        g.set(4, 0, anchor(Entity::Sink, recipe));
+        g.set(5, 1, inserter(Direction::East));
+        g.set(6, 1, anchor(Entity::Sink, recipe));
         g
     }
 
@@ -434,11 +473,15 @@ mod tests {
     fn flooding_an_assembler_does_not_beat_its_crafting_speed() {
         // Bolt the machine straight onto the source: unlimited plates, no
         // inserter throttling the input.
-        let mut g = Grid::new(4, 1);
-        g.set(0, 0, anchor(Entity::Source, Item::IronPlate));
+        //
+        //     . A A A . .
+        //     S A A A i K
+        //     . A A A . .
+        let mut g = Grid::new(6, 3);
+        g.set(0, 1, anchor(Entity::Source, Item::IronPlate));
         g.set(1, 0, assembler(Item::IronGear));
-        g.set(2, 0, inserter(Direction::East));
-        g.set(3, 0, anchor(Entity::Sink, Item::IronGear));
+        g.set(4, 1, inserter(Direction::East));
+        g.set(5, 1, anchor(Entity::Sink, Item::IronGear));
 
         // An AM1 running a 0.5 s recipe crafts once a second however much you
         // shovel at it, so 1.0 gear/s leaves the machine and the output inserter
@@ -463,18 +506,26 @@ mod tests {
         assert!(!item_reaches_sink(&g));
     }
 
-    /// A belt running past a machine's wall does not load it. Only an inserter
-    /// does.
+    /// A belt running into a machine's wall does not load it. Only an inserter
+    /// does — and that stays true of all nine of the machine's walls, not just
+    /// the one its anchor sits on.
     #[test]
     fn a_belt_alongside_an_assembler_does_not_feed_it() {
-        let mut g = Grid::new(4, 1);
-        g.set(0, 0, anchor(Entity::Source, Item::IronPlate));
-        g.set(1, 0, Cell::belt(Direction::East));
+        //     . . A A A . .
+        //     S b A A A i K
+        //     . . A A A . .
+        let mut g = Grid::new(7, 3);
+        g.set(0, 1, anchor(Entity::Source, Item::IronPlate));
+        g.set(1, 1, Cell::belt(Direction::East));
         g.set(2, 0, assembler(Item::IronGear));
-        g.set(3, 0, anchor(Entity::Sink, Item::IronGear));
-        // The belt offers, the machine refuses, and nothing is crafted. (The
-        // machine would also need an inserter to unload it.)
+        g.set(5, 1, inserter(Direction::East));
+        g.set(6, 1, anchor(Entity::Sink, Item::IronGear));
+
+        // The belt offers into the machine's west wall, the machine refuses, and
+        // nothing is crafted — even though the line is otherwise complete and
+        // the same layout with an inserter in the belt's place delivers.
         assert_eq!(score(&g), 0.0);
+        assert!(score(&assembler_line(Item::IronGear, Item::IronPlate)) > 0.0);
     }
 
     /// An inserter picks up from the tile behind it, not from one beside it.

@@ -16,6 +16,7 @@
 //! * [`train`] — the training loop.
 //! * [`sample`] — inference / sampling & functional validation.
 //! * [`best_of_n`] — draw several factories, keep the one the simulator prefers.
+//! * [`viewer`] — draw a factory as SVG, at the footprints Factorio enforces.
 
 pub mod backend;
 pub mod best_of_n;
@@ -32,4 +33,5 @@ pub mod sim;
 pub mod textual;
 pub mod throughput;
 pub mod train;
+pub mod viewer;
 pub mod world;
