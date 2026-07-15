@@ -15,8 +15,10 @@
 //! * [`metrics`] — training / validation metrics.
 //! * [`train`] — the training loop.
 //! * [`sample`] — inference / sampling & functional validation.
+//! * [`best_of_n`] — draw several factories, keep the one the simulator prefers.
 
 pub mod backend;
+pub mod best_of_n;
 pub mod blueprint;
 pub mod data;
 pub mod diffusion;
