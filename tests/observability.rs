@@ -177,6 +177,21 @@ fn html_report_embeds_parameters_and_metric_charts() {
     assert!(html.contains("per-channel NLL"));
     assert!(html.contains("application/json"));
     assert!(!html.contains("https://"), "report must work offline");
+
+    // Every simulator-grounded number the console prints must also be a curve.
+    // The console line reports `thput`, `ratio` and `beat`; the report used to
+    // chart only `ratio`, so a run could show a rising ratio with no way to see
+    // whether the model improved or the tasks got easier.
+    for id in ["rate", "thput", "beat"] {
+        assert!(
+            html.contains(&format!("<canvas id=\"{id}\">")),
+            "report is missing the {id} chart"
+        );
+        assert!(
+            html.contains(&format!("chart('{id}'")),
+            "report never draws the {id} chart"
+        );
+    }
     fs::remove_file(path).ok();
 }
 
