@@ -609,8 +609,9 @@ fn gen_assembler_chaos(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     // sink filters the plates out as the wrong item, and a factory whose every
     // belt is correct delivers zero. It cost a quarter of this family before
     // `experiments/why_zero.rs` pinned it down.
-    // `drop` is placed before either route, so unlike the rest of the gear line
-    // it cannot simply be routed around.
+    //
+    // The rest of the gear line is routed around the source below. `drop` is
+    // placed before either route runs and so has to be rejected here instead.
     if neighbours(source, size).contains(&drop) {
         return None;
     }
