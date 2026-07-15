@@ -34,7 +34,9 @@ struct Args {
     grad_clip: f32,
     #[arg(long, default_value_t = 200)]
     val_every: usize,
-    #[arg(long, default_value_t = 64)]
+    /// Held-out factories per validation pass. 64 cannot distinguish a perfect
+    /// model from an 83%-per-lesson one; see docs/TRAINING_ANALYSIS.md.
+    #[arg(long, default_value_t = 512)]
     val_batch: usize,
     #[arg(long, default_value_t = 12)]
     sample_steps: usize,

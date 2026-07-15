@@ -4,6 +4,7 @@
 //! Reports are a single offline HTML file with embedded data and canvas charts,
 //! making a long run inspectable without an account or network connection.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -12,6 +13,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::metrics::ReconReport;
 use crate::train::TrainLog;
 use crate::world::Grid;
 
@@ -148,11 +150,12 @@ pub fn write_sample_report(path: &Path, entries: &[SampleReportEntry<'_>]) -> Re
 
 fn metric_record(log: &TrainLog) -> Value {
     let val = log.val.as_ref().map(validation_record);
-    let val_by_lesson: serde_json::Map<String, Value> = log
-        .val_by_lesson
-        .iter()
-        .map(|(name, report)| (name.clone(), validation_record(report)))
-        .collect();
+    let by_lesson = |reports: &BTreeMap<String, ReconReport>| -> serde_json::Map<String, Value> {
+        reports
+            .iter()
+            .map(|(name, report)| (name.clone(), validation_record(report)))
+            .collect()
+    };
     json!({
         "step": log.step,
         "elapsed_seconds": log.elapsed_seconds,
@@ -174,11 +177,13 @@ fn metric_record(log: &TrainLog) -> Value {
             "misc_nll": log.channel_nll[3]
         },
         "val": val,
-        "val_by_lesson": val_by_lesson
+        "val_by_lesson": by_lesson(&log.val_by_lesson),
+        "val_scratch": log.val_scratch.as_ref().map(validation_record),
+        "val_scratch_by_lesson": by_lesson(&log.val_scratch_by_lesson)
     })
 }
 
-fn validation_record(r: &crate::metrics::ReconReport) -> Value {
+fn validation_record(r: &ReconReport) -> Value {
     json!({
         "n": r.n_factories,
         "masked_cells": r.masked_cells,
@@ -254,20 +259,24 @@ const TRAINING_REPORT_TEMPLATE: &str = r#"<!doctype html>
  <div class="chart"><h2>Training throughput</h2><canvas id="speed"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>average samples / second</span></div></div>
  <div class="chart"><h2>Placement recall and train accuracy</h2><canvas id="train"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>Placement recall</span><span><i class="dot" style="background:var(--c)"></i>entity</span><span><i class="dot" style="background:var(--b)"></i>direction</span></div></div>
  <div class="chart"><h2>Functional / exact / consistent</h2><canvas id="validation"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>functional</span><span><i class="dot" style="background:var(--c)"></i>exact</span><span><i class="dot" style="background:var(--b)"></i>consistent</span></div></div>
+ <div class="chart"><h2>Built from scratch (source and sink only)</h2><canvas id="scratch"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>functional</span><span><i class="dot" style="background:var(--c)"></i>exact</span></div></div>
 </section>
 <section class="card definitions"><h2>Run parameters and what they control</h2><table id="parameters"></table></section>
 <section class="card definitions"><h2>Latest frozen validation by lesson</h2><table id="lessons"></table></section>
+<section class="card definitions"><h2>Latest from-scratch validation by lesson</h2><div class="muted">Everything except the source and sink is masked, so the model designs the factory instead of filling gaps. Read <b>functional</b>: many layouts deliver the item, so <b>exact</b> only rewards rediscovering the generator's own answer.</div><table id="scratch-lessons"></table></section>
 <script id="report-data" type="application/json">__REPORT_DATA__</script>
 <script>
 const data=JSON.parse(document.getElementById('report-data').textContent),m=data.metadata,rows=data.metrics;
-const last=rows[rows.length-1]||{},lastVal=[...rows].reverse().find(x=>x.val)?.val;
-const cards=[['Backend',m.backend],['Grid',m.grid_size+' × '+m.grid_size],['Samples seen',(last.samples_seen||0).toLocaleString()],['Samples / sec',(last.samples_per_second||0).toFixed(1)],['Final loss',(last.loss||0).toFixed(4)],['Validation functional',lastVal?(100*lastVal.functional_rate).toFixed(1)+'%':'—']];
+const last=rows[rows.length-1]||{},lastVal=[...rows].reverse().find(x=>x.val)?.val,lastScratch=[...rows].reverse().find(x=>x.val_scratch)?.val_scratch;
+const pct=v=>v===undefined?'—':(100*v).toFixed(1)+'%';
+const cards=[['Backend',m.backend],['Grid',m.grid_size+' × '+m.grid_size],['Samples seen',(last.samples_seen||0).toLocaleString()],['Samples / sec',(last.samples_per_second||0).toFixed(1)],['Final loss',(last.loss||0).toFixed(4)],['Validation functional',pct(lastVal?.functional_rate)],['From-scratch functional',pct(lastScratch?.functional_rate)]];
 document.getElementById('summary').innerHTML=cards.map(x=>`<div class="card"><span class="muted">${x[0]}</span><b>${x[1]}</b></div>`).join('');
 const meanings={backend:'Compute backend used for this run.',grid_size:'Width and height of each categorical world.',steps:'Optimizer updates.',batch_size:'Fresh procedural factories per update.',val_batch:'Fixed held-out factories scored at each validation.',sample_steps:'Reverse-diffusion reveal rounds during validation.',seed:'Controls training and the independent frozen validation corpus.',peak_lr:'Maximum AdamW learning rate.',warmup_steps:'Linear ramp before cosine decay.',grad_clip:'Maximum gradient norm.',hidden:'Convolution tower width.',blocks:'Residual convolution blocks.',embed_dim:'Embedding width per categorical channel.',time_dim:'Diffusion-time embedding width.',elbo_weight:'Use continuous-time 1/t ELBO weighting.',t_min:'Minimum diffusion time used by ELBO weighting.',structure_weight:'Extra loss weight for non-empty target cells; counters empty collapse.'};
 document.getElementById('parameters').innerHTML=Object.entries(m).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td><td class="muted">${meanings[k]||''}</td></tr>`).join('');
-const latestLessons=[...rows].reverse().find(r=>Object.keys(r.val_by_lesson||{}).length)?.val_by_lesson||{};document.getElementById('lessons').innerHTML='<tr><td>lesson</td><td>n</td><td>functional</td><td>exact</td><td>consistent</td></tr>'+Object.entries(latestLessons).map(([name,v])=>`<tr><td>${name}</td><td>${v.n}</td><td>${(100*v.functional_rate).toFixed(1)}%</td><td>${(100*v.exact_rate).toFixed(1)}%</td><td>${(100*v.consistent_rate).toFixed(1)}%</td></tr>`).join('');
+function lessonTable(id,key){const latest=[...rows].reverse().find(r=>Object.keys(r[key]||{}).length)?.[key]||{};document.getElementById(id).innerHTML='<tr><td>lesson</td><td>n</td><td>functional</td><td>exact</td><td>consistent</td></tr>'+Object.entries(latest).map(([name,v])=>`<tr><td>${name}</td><td>${v.n}</td><td>${pct(v.functional_rate)}</td><td>${pct(v.exact_rate)}</td><td>${pct(v.consistent_rate)}</td></tr>`).join('');}
+lessonTable('lessons','val_by_lesson');lessonTable('scratch-lessons','val_scratch_by_lesson');
 function chart(id,series,yFixed=false){const c=document.getElementById(id),ctx=c.getContext('2d'),dpr=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=w*dpr;c.height=h*dpr;ctx.scale(dpr,dpr);ctx.strokeStyle='#34414c';ctx.lineWidth=1;for(let i=0;i<5;i++){let y=12+i*(h-30)/4;ctx.beginPath();ctx.moveTo(42,y);ctx.lineTo(w-8,y);ctx.stroke()}const vals=series.flatMap(s=>s.values.map(x=>x[1])).filter(Number.isFinite),max=yFixed?1:vals.reduce((a,v)=>Math.max(a,v),1e-12),min=yFixed?0:vals.reduce((a,v)=>Math.min(a,v),0);for(const s of series){ctx.strokeStyle=s.color;ctx.lineWidth=2;ctx.beginPath();let started=false;for(const [step,v] of s.values){if(!Number.isFinite(v))continue;const x=42+(w-52)*(step-1)/Math.max(1,m.steps-1),y=12+(h-30)*(1-(v-min)/Math.max(1e-12,max-min));started?ctx.lineTo(x,y):ctx.moveTo(x,y);started=true}ctx.stroke()}ctx.fillStyle='#9eabb6';ctx.font='11px system-ui';ctx.fillText(max.toPrecision(3),3,14);ctx.fillText(min.toPrecision(3),3,h-8)}
-const xy=f=>rows.map(r=>[r.step,f(r)]);chart('loss',[{color:'#5ee6a8',values:xy(r=>r.loss)},{color:'#ffcc66',values:xy(r=>r.train.entity_nll)},{color:'#79b8ff',values:xy(r=>r.train.direction_nll)}]);chart('schedule',[{color:'#79b8ff',values:xy(r=>r.lr)}]);chart('speed',[{color:'#5ee6a8',values:xy(r=>r.samples_per_second)}]);chart('train',[{color:'#5ee6a8',values:xy(r=>r.placement_recall)},{color:'#79b8ff',values:xy(r=>r.train.entity_acc)},{color:'#ffcc66',values:xy(r=>r.train.direction_acc)}],true);const vr=rows.filter(r=>r.val);chart('validation',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.functional_rate])},{color:'#79b8ff',values:vr.map(r=>[r.step,r.val.exact_rate])},{color:'#ffcc66',values:vr.map(r=>[r.step,r.val.consistent_rate])}],true);
+const xy=f=>rows.map(r=>[r.step,f(r)]);chart('loss',[{color:'#5ee6a8',values:xy(r=>r.loss)},{color:'#ffcc66',values:xy(r=>r.train.entity_nll)},{color:'#79b8ff',values:xy(r=>r.train.direction_nll)}]);chart('schedule',[{color:'#79b8ff',values:xy(r=>r.lr)}]);chart('speed',[{color:'#5ee6a8',values:xy(r=>r.samples_per_second)}]);chart('train',[{color:'#5ee6a8',values:xy(r=>r.placement_recall)},{color:'#79b8ff',values:xy(r=>r.train.entity_acc)},{color:'#ffcc66',values:xy(r=>r.train.direction_acc)}],true);const vr=rows.filter(r=>r.val);chart('validation',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.functional_rate])},{color:'#79b8ff',values:vr.map(r=>[r.step,r.val.exact_rate])},{color:'#ffcc66',values:vr.map(r=>[r.step,r.val.consistent_rate])}],true);const sr=rows.filter(r=>r.val_scratch);chart('scratch',[{color:'#5ee6a8',values:sr.map(r=>[r.step,r.val_scratch.functional_rate])},{color:'#79b8ff',values:sr.map(r=>[r.step,r.val_scratch.exact_rate])}],true);
 </script></main></body></html>"#;
 
 const SAMPLE_REPORT_TEMPLATE: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>diffusion-factorio reconstruction diagnostics</title><style>
