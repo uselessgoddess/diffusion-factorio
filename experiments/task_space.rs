@@ -6,7 +6,10 @@
 //! experiment distinguishes them by measuring the curriculum itself — no model
 //! involved.
 //!
-//! Run: `cargo run --release --example task_space`
+//! Run: `cargo run --release --example task_space [SIZE]`
+//!
+//! `SIZE` defaults to [`train::TrainConfig`]'s grid size. Pass another to ask
+//! the question that answer raised — how much task space a bigger board buys.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -18,7 +21,7 @@ use diffusion_factorio::world::{Cell, Entity, Grid, Item};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-const SIZE: usize = 11;
+const DEFAULT_SIZE: usize = 11;
 const SEEDS: u64 = 200_000;
 
 /// Canonical key for a full factory. Uses every channel (the ASCII view is
@@ -83,11 +86,25 @@ fn answer_key(g: &Grid, observed: &[bool]) -> String {
 }
 
 fn main() {
+    let size: usize = std::env::args()
+        .nth(1)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(DEFAULT_SIZE);
+
+    let feasible = LessonKind::all()
+        .iter()
+        .filter(|k| size >= k.min_size())
+        .count();
+
     println!("=== 1. How many distinct factories can each lesson family produce? ===");
-    println!("(size {SIZE}, {SEEDS} distinct generator seeds per family)\n");
+    println!("(size {size}, {SEEDS} distinct generator seeds per family)");
+    println!(
+        "({feasible} of {} families fit at this size)\n",
+        LessonKind::all().len()
+    );
 
     let mut totals = Vec::new();
-    for &kind in LessonKind::all() {
+    for &kind in LessonKind::all().iter().filter(|k| size >= k.min_size()) {
         let t0 = Instant::now();
         let mut factories = HashSet::new();
         let mut generated = 0usize;
@@ -96,7 +113,7 @@ fn main() {
         let mut answers_per_context: HashMap<String, HashSet<String>> = HashMap::new();
 
         for seed in 0..SEEDS {
-            let Some(sample) = generate(kind, SIZE, seed) else {
+            let Some(sample) = generate(kind, size, seed) else {
                 continue;
             };
             generated += 1;
@@ -118,9 +135,10 @@ fn main() {
             .count();
         let secs = t0.elapsed().as_secs_f64();
         // A 5,000-step run draws 5,000 * 32 = 160,000 samples uniformly over the
-        // families feasible at this size. All of them are, at size 11: a circuit
-        // line is exactly 11 wide, which is the tightest fit in the curriculum.
-        let draws_per_family = 160_000.0 / LessonKind::all().len() as f64;
+        // families that *fit* — train.rs skips the rest, so a size below 11 (a
+        // circuit line is 11 wide) spreads the same budget over fewer families
+        // and makes each of them look more memorized than it is.
+        let draws_per_family = 160_000.0 / feasible as f64;
         let repeats = draws_per_family / answers_per_context.len() as f64;
         println!(
             "{:<22} distinct factories: {:>6} | distinct tasks: {:>6} | ambiguous tasks: {ambiguous}",
