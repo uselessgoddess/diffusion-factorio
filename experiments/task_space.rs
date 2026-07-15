@@ -132,24 +132,43 @@ fn main() {
             "",
             generated as f64 / secs,
         );
-        totals.push((kind.name(), answers_per_context.len(), repeats));
+        totals.push((kind.name(), answers_per_context.len(), repeats, ambiguous));
     }
 
     println!("\n  A 'task' = one distinct conditioning the model is asked to complete.");
     println!("  Families small enough to memorize outright (each task seen many times):");
-    for (name, tasks, repeats) in totals.iter().filter(|(_, _, r)| *r > 10.0) {
+    for (name, tasks, repeats, _) in totals.iter().filter(|(_, _, r, _)| *r > 10.0) {
         println!("    {name:<22} {tasks:>6} tasks, seen ~{repeats:.0}x each");
     }
     println!("  Families too large to memorize (each task seen ~once => real generalization):");
-    for (name, tasks, repeats) in totals.iter().filter(|(_, _, r)| *r <= 10.0) {
+    for (name, tasks, repeats, _) in totals.iter().filter(|(_, _, r, _)| *r <= 10.0) {
         println!("    {name:<22} {tasks:>6}+ tasks, seen ~{repeats:.1}x each");
     }
 
     println!("\n=== 2. Is `exact` a fair metric? (is the target label unique?) ===");
-    println!("Every conditioning above maps to exactly one answer => the label is a");
-    println!("deterministic function of the input. `exact=1.0` is therefore reachable,");
-    println!("and since a correct exact match is always functional, functional==exact.");
-    println!("This is a property of the *data*, not evidence of factory-design skill.\n");
+    let (rigid, ambiguous): (Vec<_>, Vec<_>) = totals.iter().partition(|(_, _, _, a)| *a == 0);
+    for (name, tasks, _, _) in &rigid {
+        println!("  {name:<22} every one of its {tasks} tasks has exactly 1 answer");
+    }
+    println!("For these the label is a deterministic function of the input. `exact=1.0`");
+    println!("is reachable, and since a correct exact match is always functional,");
+    println!("functional==exact. That is a property of the *data*, not evidence of");
+    println!("factory-design skill -- and it is why the 5,000-step run's two headline");
+    println!("metrics moved as one: there was only ever one answer, so getting it right");
+    println!("and getting it working were the same event.\n");
+    for (name, tasks, _, a) in &ambiguous {
+        println!("  {name:<22} {a} of its {tasks} tasks admit more than one answer");
+    }
+    if ambiguous.is_empty() {
+        println!("  (none -- nothing here can teach the model to choose)");
+    } else {
+        println!("For these `exact` is no longer the right question: the model is asked");
+        println!("for *a* working factory, not for the one the generator happened to roll,");
+        println!("so `exact` is capped below 1.0 by construction while `functional` and");
+        println!("throughput are not. This is what gives Best-of-N a choice to make and a");
+        println!("policy gradient something to push on.");
+    }
+    println!();
 
     println!("=== 3. Is the `functional` metric item-aware? ===");
     // Belt raw iron straight into a sink that wants gears: well-connected, but

@@ -5,6 +5,7 @@
 //!
 //! * [`world`] — grid / entity representation.
 //! * [`sim`] — functional evaluation (does the factory route items?).
+//! * [`throughput`] — graded evaluation (how *well* does it route them?).
 //! * [`factory_gen`] — procedural lesson generation + blanking.
 //! * [`textual`] — ASCII (de)serialization for debugging & fixtures.
 //! * [`backend`] — burn backend selection (CPU ndarray / GPU wgpu).
@@ -14,8 +15,10 @@
 //! * [`metrics`] — training / validation metrics.
 //! * [`train`] — the training loop.
 //! * [`sample`] — inference / sampling & functional validation.
+//! * [`best_of_n`] — draw several factories, keep the one the simulator prefers.
 
 pub mod backend;
+pub mod best_of_n;
 pub mod blueprint;
 pub mod data;
 pub mod diffusion;
@@ -27,5 +30,6 @@ pub mod persist;
 pub mod sample;
 pub mod sim;
 pub mod textual;
+pub mod throughput;
 pub mod train;
 pub mod world;

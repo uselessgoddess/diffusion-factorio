@@ -1,10 +1,19 @@
-//! Validation metrics. Two axes, mirroring the reference's philosophy:
-//!   * cheap per-cell / per-channel accuracy for fast signal, and
-//!   * a task-level, simulator-grounded metric (does the reconstructed factory
-//!     actually route items?) — the analogue of their normalized-throughput
-//!     rollout, which is what really tells you the model learned something.
+//! Validation metrics. Three axes, in increasing order of how much they tell
+//! you and how much they cost:
+//!   * cheap per-cell / per-channel accuracy for fast signal;
+//!   * a task-level, simulator-grounded check (does the reconstructed factory
+//!     route items at all?) — binary, and saturated: at `functional=0.99` it has
+//!     nothing left to say; and
+//!   * **graded throughput** (how *fast* does it route them?), which is what
+//!     separates two working factories and is the analogue of the reference's
+//!     normalized-throughput rollout.
+//!
+//! The ratio of the reconstruction's rate to the *generator's own answer* is the
+//! headline number: 1.0 means the model matched the curriculum's solution, and
+//! above 1.0 means it found a better factory than the one it was taught.
 
 use crate::sim::item_reaches_sink;
+use crate::throughput;
 use crate::world::{Channel, Grid, N_CHANNELS};
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +40,19 @@ pub struct ReconReport {
     pub functional: usize,
     /// Of the originals, how many were functional (upper bound / sanity).
     pub original_functional: usize,
+    /// Summed items/second delivered by the reconstructions.
+    pub throughput: f64,
+    /// Summed items/second delivered by the generator's own answers.
+    pub original_throughput: f64,
+    /// Summed per-task `recon / original` rate ratios, over gradeable tasks.
+    pub throughput_ratio: f64,
+    /// Tasks whose original answer delivers anything at all — the denominator
+    /// for the ratio. A task nobody can score tells us nothing about the model.
+    pub gradeable: usize,
+    /// Reconstructions that deliver *more* than the answer they were taught.
+    /// This is the only metric here that can report a model out-building its
+    /// curriculum, so it is the one to watch.
+    pub beat_original: usize,
 }
 
 impl ReconReport {
@@ -50,13 +72,26 @@ impl ReconReport {
     pub fn consistent_rate(&self) -> f64 {
         rate(self.consistent, self.n_factories)
     }
+    /// Mean items/second delivered per reconstructed factory.
+    pub fn throughput_mean(&self) -> f64 {
+        div(self.throughput, self.n_factories)
+    }
+    /// Mean fraction of the generator's own delivered rate that the model
+    /// achieved. 1.0 = matched the taught answer; >1.0 = beat it.
+    pub fn throughput_ratio_mean(&self) -> f64 {
+        div(self.throughput_ratio, self.gradeable)
+    }
 }
 
 fn rate(num: usize, den: usize) -> f64 {
+    div(num as f64, den)
+}
+
+fn div(num: f64, den: usize) -> f64 {
     if den == 0 {
         0.0
     } else {
-        num as f64 / den as f64
+        num / den as f64
     }
 }
 
@@ -103,6 +138,21 @@ pub fn reconstruction_report(
         if item_reaches_sink(orig) {
             r.original_functional += 1;
         }
+
+        // How fast, not just whether. Rates are absolute items/s and are not
+        // comparable across tasks -- a gear line and a cable line have different
+        // ceilings -- so the ratio against the generator's own answer is what
+        // gets averaged.
+        let (recon_rate, orig_rate) = (throughput::score(recon), throughput::score(orig));
+        r.throughput += recon_rate;
+        r.original_throughput += orig_rate;
+        if orig_rate > 0.0 {
+            r.gradeable += 1;
+            r.throughput_ratio += recon_rate / orig_rate;
+            if recon_rate > orig_rate {
+                r.beat_original += 1;
+            }
+        }
     }
     r
 }
@@ -111,12 +161,15 @@ impl std::fmt::Display for ReconReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "n={} | exact={:.3} functional={:.3} (orig_fn={}) consistent={:.3} | acc[entity={:.3} dir={:.3} item={:.3} misc={:.3}]",
+            "n={} | exact={:.3} functional={:.3} (orig_fn={}) consistent={:.3} | thput={:.3}/s ratio={:.3} beat={} | acc[entity={:.3} dir={:.3} item={:.3} misc={:.3}]",
             self.n_factories,
             self.exact_rate(),
             self.functional_rate(),
             self.original_functional,
             self.consistent_rate(),
+            self.throughput_mean(),
+            self.throughput_ratio_mean(),
+            self.beat_original,
             self.channel_acc(0),
             self.channel_acc(1),
             self.channel_acc(2),

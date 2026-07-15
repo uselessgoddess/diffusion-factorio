@@ -19,10 +19,14 @@ use std::collections::VecDeque;
 /// `UNDERGROUND_REACH` in the reference.
 pub const UNDERGROUND_REACH: i32 = 5;
 
-/// Follow the belt network from a starting belt cell; return every belt/exit
-/// cell the flow reaches. A belt at `p` facing `d` pushes flow to `p + d`.
-/// Underground entrances jump to the nearest matching exit within reach.
-fn flow_targets(grid: &Grid, x: usize, y: usize) -> Vec<(usize, usize)> {
+/// Every cell this one pushes flow *into*. A belt at `p` facing `d` pushes flow
+/// to `p + d`; underground entrances jump to the nearest matching exit within
+/// reach; a source or an assembler offers to every orthogonal neighbour.
+///
+/// This says only who *offers* to whom. Whether the receiver takes it is the
+/// receiver's business — see `throughput::accepts_from`. [`item_reaches_sink`]
+/// is deliberately laxer and accepts from any pusher.
+pub(crate) fn flow_targets(grid: &Grid, x: usize, y: usize) -> Vec<(usize, usize)> {
     let cell = grid.get(x, y);
     let mut out = Vec::new();
     match cell.entity {
@@ -33,11 +37,12 @@ fn flow_targets(grid: &Grid, x: usize, y: usize) -> Vec<(usize, usize)> {
                 out.push((nx as usize, ny as usize));
             }
         }
-        Entity::Assembler => {
+        Entity::Assembler | Entity::Source => {
             // A machine consumes an input and makes its product available to any
-            // adjacent pickup (inserter). Re-emit to every orthogonal neighbour;
-            // the BFS `visited` guard and the inserter's own facing decide where
-            // the flow can actually continue.
+            // adjacent pickup (inserter); a source anchor offers its item the
+            // same way. Re-emit to every orthogonal neighbour; the BFS `visited`
+            // guard and the inserter's own facing decide where the flow can
+            // actually continue.
             out.extend(orthogonal(grid, x, y));
         }
         Entity::UndergroundBelt => {
@@ -140,7 +145,7 @@ fn transform(grid: &Grid, x: usize, y: usize, carried: Item) -> Option<Item> {
 
 /// An untagged sink has no filter and accepts anything; a tagged one accepts
 /// only its own item.
-fn sink_accepts(filter: Item, carried: Item) -> bool {
+pub(crate) fn sink_accepts(filter: Item, carried: Item) -> bool {
     filter == Item::None || filter == carried
 }
 

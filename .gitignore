@@ -3,5 +3,6 @@
 *.mpk
 *.pt
 /runs
+/ci-logs
 /sample-report.html
 /generated-blueprint.txt

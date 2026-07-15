@@ -3,13 +3,19 @@
 //!
 //! Prints, per example, the masked input, the model's reconstruction and the
 //! ground truth, plus an aggregate reconstruction report (per-channel accuracy,
-//! exact-match and — the metric that matters — functional validity).
+//! exact-match, functional validity and delivered throughput).
 //!
 //! Usage: `cargo run --release --bin sample -- --ckpt checkpoints/denoiser`
+//!
+//! With `--best-of N --temperature T` it draws `N` candidates per task and keeps
+//! whichever one the simulator scores highest — including for `--blueprint-out`,
+//! so the exported blueprint is the best factory the model could find rather
+//! than the first one it happened to produce.
 
 use std::path::PathBuf;
 
 use clap::Parser;
+use diffusion_factorio::best_of_n::{best_of_n, BestOfN, BestOfNConfig};
 use diffusion_factorio::blueprint::{blueprint_string, grid_to_blueprint};
 use diffusion_factorio::factory_gen::{generate, LessonKind};
 use diffusion_factorio::metrics::reconstruction_report;
@@ -42,6 +48,14 @@ struct Args {
     steps: usize,
     #[arg(long, default_value_t = 0)]
     seed: u64,
+    /// Softmax temperature. `0` is greedy/deterministic; above zero the sampler
+    /// draws, which is what gives `--best-of` something to choose between.
+    #[arg(long, default_value_t = 0.0)]
+    temperature: f64,
+    /// Draw this many candidates per task and keep the one the simulator scores
+    /// highest. Costs one extra sampling pass per candidate and no retraining.
+    #[arg(long, default_value_t = 1)]
+    best_of: usize,
     /// Offline spatial confidence/entropy/error heatmap report.
     #[arg(long, default_value = "sample-report.html")]
     report: PathBuf,
@@ -53,11 +67,18 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     anyhow::ensure!(args.eval > 0, "--eval must be at least 1");
+    anyhow::ensure!(args.best_of > 0, "--best-of must be at least 1");
+    anyhow::ensure!(
+        args.best_of == 1 || args.temperature > 0.0,
+        "--best-of {} needs --temperature above 0: greedy decoding draws the same \
+         factory every time, so the extra passes would cost compute and change nothing",
+        args.best_of,
+    );
     let device = Default::default();
     let model = persist::load::<B>(&args.ckpt, &device)?;
     let cfg = SampleConfig {
         steps: args.steps,
-        temperature: 0.0,
+        temperature: args.temperature,
         seed: args.seed,
     };
 
@@ -81,7 +102,22 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let diagnostics = reconstruct_with_diagnostics(&model, &partials, &observed, &cfg, &device);
+    let picks = (args.best_of > 1).then(|| {
+        best_of_n(
+            &model,
+            &partials,
+            &observed,
+            &BestOfNConfig {
+                n: args.best_of,
+                sample: cfg.clone(),
+            },
+            &device,
+        )
+    });
+    let diagnostics = match &picks {
+        Some(picks) => picks.iter().map(|pick| pick.best.clone()).collect(),
+        None => reconstruct_with_diagnostics(&model, &partials, &observed, &cfg, &device),
+    };
     let recon: Vec<Grid> = diagnostics
         .iter()
         .map(|result| result.grid.clone())
@@ -96,6 +132,29 @@ fn main() -> anyhow::Result<()> {
 
     let report = reconstruction_report(&originals, &recon, &observed);
     println!("\nAGGREGATE: {report}");
+
+    if let Some(picks) = &picks {
+        let mean = |f: fn(&BestOfN) -> f64| picks.iter().map(f).sum::<f64>() / picks.len() as f64;
+        let (first, best) = (mean(BestOfN::first_score), mean(BestOfN::best_score));
+        let distinct = mean(|pick| pick.distinct as f64);
+        println!(
+            "BEST-OF-{}: one draw delivers {first:.3}/s, best of {} delivers {best:.3}/s \
+             (+{:.1}%) | {distinct:.2} distinct factories per task",
+            args.best_of,
+            args.best_of,
+            if first > 0.0 {
+                100.0 * (best - first) / first
+            } else {
+                0.0
+            },
+        );
+        if distinct < 1.5 {
+            println!(
+                "  note: the draws barely differ, so Best-of-N has little to choose between. \
+                 Either raise --temperature, or the model has collapsed to one answer per task."
+            );
+        }
+    }
 
     let entries: Vec<SampleReportEntry<'_>> = (0..args.show.min(recon.len()))
         .map(|i| SampleReportEntry {
