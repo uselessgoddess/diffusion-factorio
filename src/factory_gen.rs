@@ -31,6 +31,10 @@ pub enum LessonKind {
     /// Source → belt → underground(down..up) → belt → sink across a wall.
     /// Exercises misc (underground tags).
     UndergroundCross,
+    /// Up to [`BANK_LINES`] parallel assembler lines feeding one shared sink.
+    /// The only family with **many** valid answers, and they are not equally
+    /// good — see [`gen_assembler_bank`].
+    AssemblerBank,
 }
 
 impl LessonKind {
@@ -40,6 +44,7 @@ impl LessonKind {
             LessonKind::MoveOneItemChaos,
             LessonKind::AssemblerLine,
             LessonKind::UndergroundCross,
+            LessonKind::AssemblerBank,
         ]
     }
     pub fn name(self) -> &'static str {
@@ -48,9 +53,26 @@ impl LessonKind {
             LessonKind::MoveOneItemChaos => "MOVE_ONE_ITEM_CHAOS",
             LessonKind::AssemblerLine => "ASSEMBLER_LINE",
             LessonKind::UndergroundCross => "UNDERGROUND_CROSS",
+            LessonKind::AssemblerBank => "ASSEMBLER_BANK",
         }
     }
+
+    /// Does this family admit more than one valid answer per task?
+    ///
+    /// Everywhere else the generator hands the model a task whose label is a
+    /// *function* of the conditioning, which is why `experiments/task_space`
+    /// measures zero ambiguous tasks and why `exact` and `functional` moved
+    /// together for the whole 5,000-step run: there was only ever one answer, so
+    /// getting it right and getting it working were the same event. A metric
+    /// that ranks factories has nothing to do on data like that, and neither
+    /// does a policy gradient.
+    pub fn is_ambiguous(self) -> bool {
+        matches!(self, LessonKind::AssemblerBank)
+    }
 }
+
+/// Parallel lines an [`LessonKind::AssemblerBank`] scaffold offers.
+pub const BANK_LINES: usize = 3;
 
 /// A generated, known-correct factory plus the bookkeeping needed to blank it.
 #[derive(Debug, Clone)]
@@ -127,6 +149,7 @@ pub fn generate(kind: LessonKind, size: usize, seed: u64) -> Option<Sample> {
             LessonKind::MoveOneItemChaos => gen_move_one_item(size, &mut rng, true),
             LessonKind::AssemblerLine => gen_assembler_line(size, &mut rng),
             LessonKind::UndergroundCross => gen_underground_cross(size, &mut rng),
+            LessonKind::AssemblerBank => gen_assembler_bank(size, &mut rng),
         };
         if let Some(sample) = built {
             debug_assert!(
@@ -369,6 +392,134 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     })
 }
 
+/// A bank of parallel assembler lines feeding one shared sink:
+///
+/// ```text
+///   S i a i b(South)
+///   S i a i b(South)
+///   S i a i K
+/// ```
+///
+/// The scaffold — what stays observed — is only the three sources and the sink.
+/// **How many of the three lines get built is up to the answer**, and the
+/// generator picks that number at random, so the same task appears with a
+/// one-line answer, a two-line answer and a three-line answer. This is the one
+/// thing every other family lacks and the reason none of the machinery
+/// downstream had anything to do:
+///
+/// * The answers are not equally good. Each line adds its machine's output to
+///   the shared sink, so three lines deliver three times what one does. That is
+///   a *gradient over working factories* — the thing `functional` cannot see and
+///   [`crate::throughput`] can.
+/// * `exact` cannot reach 1.0 here, and should not: matching one arbitrary draw
+///   out of three is not a skill. `functional` still can, which is precisely why
+///   the two metrics finally say different things.
+/// * A model that learns the distribution can be asked for eight draws and
+///   handed the best one ([`crate::best_of_n`]) — which will usually be a
+///   three-line factory even when the taught answer had one line. That is a
+///   factory nobody put in the data, built from nothing but "plates arrive
+///   here, gears are wanted there".
+///
+/// A source stands in for an unlimited supply, so all three lines can run flat
+/// out; the ceiling is the input inserter's 0.86 items/s per line, exactly as it
+/// would be in Factorio.
+fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    // Width: source, inserter, assembler, inserter, sink/belt column.
+    if size < 5 || size < BANK_LINES {
+        return None;
+    }
+    let y0 = rng.gen_range(0..=(size - BANK_LINES));
+    let x0 = rng.gen_range(0..=(size - 5));
+    let recipe = *Item::craftable().choose(rng).unwrap();
+    let input_item = recipe
+        .ingredient()
+        .expect("every craftable recipe has an ingredient");
+
+    let mut grid = Grid::new(size, size);
+    let sink = (x0 + 4, y0 + BANK_LINES - 1);
+    let mut protected = Vec::new();
+    for j in 0..BANK_LINES {
+        grid.set(
+            x0,
+            y0 + j,
+            Cell {
+                entity: Entity::Source,
+                item: input_item,
+                ..Default::default()
+            },
+        );
+        protected.push(grid.idx(x0, y0 + j));
+    }
+    grid.set(
+        sink.0,
+        sink.1,
+        Cell {
+            entity: Entity::Sink,
+            item: recipe,
+            ..Default::default()
+        },
+    );
+    protected.push(grid.idx(sink.0, sink.1));
+
+    // The choice that makes this family ambiguous. Lines are built upward from
+    // the sink's own row so the belt column is always unbroken; leaving the
+    // count to the answer rather than to the scaffold is the entire point.
+    let lines = rng.gen_range(1..=BANK_LINES);
+    let mut removable = Vec::new();
+    for j in (BANK_LINES - lines)..BANK_LINES {
+        let y = y0 + j;
+        grid.set(
+            x0 + 1,
+            y,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        grid.set(
+            x0 + 2,
+            y,
+            Cell {
+                entity: Entity::Assembler,
+                direction: Direction::East,
+                item: recipe,
+                misc: Misc::None,
+            },
+        );
+        grid.set(
+            x0 + 3,
+            y,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        removable.extend([
+            grid.idx(x0 + 1, y),
+            grid.idx(x0 + 2, y),
+            grid.idx(x0 + 3, y),
+        ]);
+        // Every line above the sink's own row hands off to a belt running down
+        // the column into the shared sink.
+        if y != sink.1 {
+            grid.set(x0 + 4, y, Cell::belt(Direction::South));
+            removable.push(grid.idx(x0 + 4, y));
+        }
+    }
+
+    if !item_reaches_sink(&grid) {
+        return None;
+    }
+    Some(Sample {
+        kind: LessonKind::AssemblerBank,
+        solution: grid,
+        protected,
+        removable,
+    })
+}
+
 fn gen_underground_cross(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     // Horizontal line with an obstacle wall the belts tunnel under:
     // S b d # u b K   (wall at the '#').
@@ -446,6 +597,169 @@ fn gen_underground_cross(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::throughput;
+    use std::collections::{HashMap, HashSet};
+
+    /// What the model conditions on: the cells left observed, plus terrain.
+    fn conditioning(sample: &Sample, observed: &[bool]) -> String {
+        let mut key = String::new();
+        for (i, &obs) in observed.iter().enumerate() {
+            if obs {
+                let c = sample.solution.cells[i];
+                key.push_str(&format!(
+                    "{i}:{}:{}:{}:{};",
+                    c.entity as u8, c.direction as u8, c.item as u8, c.misc as u8
+                ));
+            }
+        }
+        for (i, &blocked) in sample.solution.obstacle.iter().enumerate() {
+            if blocked {
+                key.push_str(&format!("#{i};"));
+            }
+        }
+        key
+    }
+
+    /// The answer it must produce on the masked cells.
+    fn answer(sample: &Sample, observed: &[bool]) -> String {
+        let mut key = String::new();
+        for (i, &obs) in observed.iter().enumerate() {
+            if !obs {
+                let c = sample.solution.cells[i];
+                key.push_str(&format!(
+                    "{i}:{}:{}:{}:{};",
+                    c.entity as u8, c.direction as u8, c.item as u8, c.misc as u8
+                ));
+            }
+        }
+        key
+    }
+
+    /// The whole reason this family exists. `experiments/task_space` measures
+    /// zero ambiguous tasks across the original four: every task's label is a
+    /// function of its conditioning, so `exact` is always reachable, `functional`
+    /// tracks it exactly, and a ranking metric has nothing to rank. Here one task
+    /// has several valid answers, which is the precondition for everything
+    /// downstream — Best-of-N needs a choice to make, and RL needs a reward that
+    /// is not already saturated.
+    #[test]
+    fn the_assembler_bank_gives_one_task_several_valid_answers() {
+        let mut answers: HashMap<String, HashSet<String>> = HashMap::new();
+        for seed in 0..2_000u64 {
+            let Some(sample) = generate(LessonKind::AssemblerBank, 11, seed) else {
+                continue;
+            };
+            let (_, observed) = sample.blank_to_scaffold();
+            answers
+                .entry(conditioning(&sample, &observed))
+                .or_default()
+                .insert(answer(&sample, &observed));
+        }
+
+        let ambiguous = answers.values().filter(|a| a.len() > 1).count();
+        assert!(
+            ambiguous > 0,
+            "every task still has exactly one answer -- the family is pointless"
+        );
+        // Not a fluke on one task: the family is ambiguous by construction, so
+        // essentially every task it produces should be.
+        assert!(
+            ambiguous * 4 > answers.len() * 3,
+            "only {ambiguous} of {} tasks admit more than one answer",
+            answers.len()
+        );
+        assert!(LessonKind::AssemblerBank.is_ambiguous());
+        assert!(LessonKind::all()
+            .iter()
+            .filter(|k| k.is_ambiguous())
+            .all(|k| *k == LessonKind::AssemblerBank));
+    }
+
+    /// Ambiguity alone is not enough: if every answer delivered the same rate,
+    /// ranking them would still be a coin flip. The answers have to be *unequal*,
+    /// and by a real margin — that margin is the gradient Best-of-N climbs and
+    /// the one `beat_original` reports.
+    #[test]
+    fn the_bank_answers_are_not_equally_good() {
+        let mut by_rate: HashMap<String, Vec<f64>> = HashMap::new();
+        for seed in 0..2_000u64 {
+            let Some(sample) = generate(LessonKind::AssemblerBank, 11, seed) else {
+                continue;
+            };
+            let (_, observed) = sample.blank_to_scaffold();
+            by_rate
+                .entry(conditioning(&sample, &observed))
+                .or_default()
+                .push(throughput::score(&sample.solution));
+        }
+
+        let spread = by_rate
+            .values()
+            .filter(|rates| {
+                let (lo, hi) = (
+                    rates.iter().copied().fold(f64::INFINITY, f64::min),
+                    rates.iter().copied().fold(0.0, f64::max),
+                );
+                // Each extra line adds a whole machine's output, so the best
+                // answer to a task should deliver multiples of the worst.
+                hi > lo * 1.9
+            })
+            .count();
+        assert!(
+            spread * 2 > by_rate.len(),
+            "only {spread} of {} tasks have answers that differ in rate",
+            by_rate.len()
+        );
+    }
+
+    /// Lines are supposed to add up rather than fight over the sink. If the belt
+    /// column ever failed to merge them, ambiguity would still be there but the
+    /// rate ranking would be noise, and every conclusion drawn from it wrong.
+    #[test]
+    fn each_extra_line_in_the_bank_adds_its_own_output() {
+        // Rate as a function of how many lines the answer built. Recipes differ
+        // in rate, so group by recipe and compare like with like.
+        let mut by_recipe: HashMap<(u8, usize), f64> = HashMap::new();
+        for seed in 0..2_000u64 {
+            let Some(sample) = generate(LessonKind::AssemblerBank, 11, seed) else {
+                continue;
+            };
+            let lines = sample
+                .solution
+                .cells
+                .iter()
+                .filter(|c| c.entity == Entity::Assembler)
+                .count();
+            let recipe = sample
+                .solution
+                .cells
+                .iter()
+                .find(|c| c.entity == Entity::Sink)
+                .expect("bank always has a sink")
+                .item as u8;
+            let rate = throughput::score(&sample.solution);
+            let previous = by_recipe.insert((recipe, lines), rate);
+            if let Some(previous) = previous {
+                assert!(
+                    (previous - rate).abs() < 1e-9,
+                    "{lines} lines of recipe {recipe} delivered {previous} and {rate}"
+                );
+            }
+        }
+
+        for recipe in Item::craftable() {
+            let one = by_recipe[&(recipe as u8, 1)];
+            assert!(one > 0.0, "a one-line bank delivers nothing");
+            for lines in 2..=BANK_LINES {
+                let rate = by_recipe[&(recipe as u8, lines)];
+                assert!(
+                    (rate - one * lines as f64).abs() < 1e-9,
+                    "{lines} lines delivered {rate}, not {} ({lines}x the one-line {one})",
+                    one * lines as f64
+                );
+            }
+        }
+    }
 
     #[test]
     fn all_lessons_generate_functional_factories() {

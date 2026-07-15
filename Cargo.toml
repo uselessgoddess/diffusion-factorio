@@ -39,3 +39,7 @@ path = "experiments/task_space.rs"
 [[example]]
 name = "blueprint_schema"
 path = "experiments/blueprint_schema.rs"
+
+[[example]]
+name = "ambiguity_demo"
+path = "experiments/ambiguity_demo.rs"

@@ -256,6 +256,7 @@ fn feasible_kinds(size: usize) -> Vec<LessonKind> {
             LessonKind::MoveOneItem | LessonKind::MoveOneItemChaos => size >= 3,
             LessonKind::AssemblerLine => size >= 5,
             LessonKind::UndergroundCross => size >= 7,
+            LessonKind::AssemblerBank => size >= 5,
         })
         .collect()
 }
