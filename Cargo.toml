@@ -55,3 +55,7 @@ path = "experiments/gallery.rs"
 [[example]]
 name = "why_zero"
 path = "experiments/why_zero.rs"
+
+[[example]]
+name = "bus_tap"
+path = "experiments/bus_tap.rs"
