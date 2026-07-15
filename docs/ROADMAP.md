@@ -262,11 +262,15 @@ see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
    sampler can be ranked (3), and at least one family admits many answers (4).
    That is *necessary* but not sufficient, and RL should still not be next:
 
-   - **Best-of-N has not been spent yet.** It buys the same thing RL buys —
-     higher delivered throughput — for zero training cost and zero risk of
-     collapse. Measure its gain first; it is also the honest read on whether the
-     model has a distribution to improve (`BestOfN::distinct`). If N draws all
-     land on the same grid, a policy gradient has nothing to sharpen either.
+   - **Best-of-N has now been spent, and it delivered.** On a checkpoint trained
+     with `ASSEMBLER_BANK` in the mix, `--best-of 16 --temperature 1.0` beats
+     greedy by **+48.7%** throughput for zero training cost and zero risk of
+     collapse, and finds **4 layouts in 128 that are better than the generator's
+     own answer** (greedy finds none). `BestOfN::distinct = 8.21` per task, so a
+     policy gradient *would* have a distribution to sharpen — but the free method
+     is already taking the gain, so RL now has to clear "better than 16 forward
+     passes" rather than "better than nothing". See
+     [`RL_ANALYSIS.md` §3.2](RL_ANALYSIS.md).
    - **One ambiguous family out of five is a thin base.** RL would optimise
      throughput on `ASSEMBLER_BANK` — 189 memorizable tasks — and could simply
      memorise "always build 3 lines" without learning anything about design.

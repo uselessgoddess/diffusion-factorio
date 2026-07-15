@@ -25,14 +25,22 @@ So the constraint is not the model, the optimizer, or the lack of RL. It is that
 This branch fixes both, in exactly the order #7 asks for: graded throughput →
 Best-of-N verified by the simulator → a curriculum that admits many answers.
 
+**And that already pays.** On a checkpoint trained with the new ambiguous family,
+`--best-of 16 --temperature 1.0` delivers **+48.7% throughput over greedy for zero
+training**, draws **8.21 distinct factories per task** (so: no memorization
+collapse), and produces **4 layouts out of 128 that are strictly better than the
+answer the generator taught it** — where greedy produces none. Meanwhile `exact`
+does not move (0.320 → 0.336). Full numbers in §3.2.
+
 **RL is not next.** Its three preconditions are now met — that is *necessary*,
 not *sufficient*. The reference already ran this experiment: **PPO, 45M samples,
 a full throughput engine — and ≈ 0 on assembler lessons**. It did not deliver.
-Meanwhile Best-of-N buys the same thing RL buys for zero training cost and hasn't
-been spent; one ambiguous family out of five is a base thin enough that RL would
-just memorize "build 3 lines"; and an unverified simulator is a reward function
-RL will *exploit* rather than satisfy. When it happens, the first form should be
-**expert iteration, not PPO**.
+Meanwhile Best-of-N is already collecting the gain RL is meant to deliver, for
+zero training cost, so RL must now clear "better than 16 forward passes" rather
+than "better than nothing"; one ambiguous family out of five is a base thin enough
+that RL would just memorize "build 3 lines"; and an unverified simulator is a
+reward function RL will *exploit* rather than satisfy. When it happens, the first
+form should be **expert iteration, not PPO**.
 
 ---
 
@@ -202,6 +210,34 @@ honest probe — **if it stays at 1, the model holds one memorized answer and no
 larger N will help** (and neither will a policy gradient, which is why this
 number is a precondition for RL rather than a nice-to-have).
 
+**Measured.** On a checkpoint trained *with* `ASSEMBLER_BANK` in the mix
+(800 steps, `hidden 32`, `blocks 3` — a scaled-down run, so read the deltas and
+not the absolutes), `--eval 128 --seed 7`:
+
+| sampler | functional | thput | ratio | **beat** | distinct |
+|---|---|---|---|---|---|
+| greedy (`--best-of 1 --temperature 0`) | 0.406 | 1.980/s | 0.372 | **0** | 1 |
+| `--best-of 16 --temperature 1.0` | **0.570** | **2.944/s** | **0.547** | **4** | **8.21** |
+
+Three things to take from this, in ascending order of importance:
+
+1. **`distinct = 8.21`, not 1.** The model is not holding one memorized answer.
+   The precondition for RL is met — the thing a policy gradient would need to
+   have something to push on is there.
+2. **+48.7% throughput over greedy, for zero training.** (The `+853.9%` the tool
+   prints compares against the *first draw at temperature 1.0*, which is a bad
+   baseline — a single hot draw delivers 0.309/s. Greedy is the honest
+   comparison, and it is the one to quote.)
+3. **`beat=4`.** Four of 128 layouts are *strictly better than the answer the
+   generator taught* — verified by the simulator, not by exact-match. Greedy
+   finds zero. This is [#7](https://github.com/uselessgoddess/diffusion-factorio/issues/7)'s
+   central ask ("схемы, которые в неё не закладывали") answered with a number,
+   and it costs no retraining.
+
+Note what did *not* move: `exact` is 0.320 → 0.336, flat. Best-of-N buys
+*working* factories, not label-matching ones — which is the whole thesis of §1.2
+and §1.3 showing up in a second, independent measurement.
+
 ### 3.3 A curriculum that admits many answers (`ASSEMBLER_BANK`)
 
 3 sources and a shared sink are the *task*; **how many of the 3 assembler lines
@@ -300,7 +336,10 @@ them.
 
 The roadmap gated RL on three things and **all three are now green**: throughput
 is graded (§3.1), the sampler can be ranked (§3.2), and at least one family
-admits many answers (§3.3). That is necessary, not sufficient.
+admits many answers (§3.3). The fourth, unstated one is green too — `distinct =
+8.21` per task (§3.2) means there is a real distribution for a policy gradient to
+sharpen, not one memorized answer. That is all *necessary*, and none of it is
+*sufficient*.
 
 **Start from the reference's result (§4): PPO + 45M samples + a full throughput
 engine ≈ 0 on assembler lessons.** The experiment has been run, at a scale we are
@@ -309,11 +348,15 @@ cannot — but it does mean "add RL" is not a plan, and it shifts the burden ont
 identifying what actually blocks assembler factories first. Then three concrete
 reasons to not do it *next*:
 
-1. **Best-of-N has not been spent.** It buys the same thing RL buys — higher
-   delivered throughput — at zero training cost and zero risk of collapse.
-   Measure its gain first. It is also the honest read on whether there is a
-   distribution to improve: if N draws all land on the same grid
-   (`BestOfN::distinct == 1`), a policy gradient has nothing to sharpen either.
+1. **Best-of-N has now been spent, and it delivered (§3.2).** +48.7% throughput
+   over greedy, and 4 layouts better than the taught answer, for **zero training
+   cost and zero risk of collapse**. That cuts both ways and it is worth being
+   precise about which way: `distinct = 8.21` means a policy gradient *would*
+   have a distribution to sharpen — the precondition is genuinely met. But the
+   free method is already collecting the gain RL is supposed to deliver, so the
+   question RL now has to answer is not "does it work" but "**does it beat 16
+   forward passes**" — a much harder bar than the one it faced yesterday, and one
+   nobody has made it clear.
 2. **One ambiguous family out of five is a thin base.** RL would optimize
    throughput on `ASSEMBLER_BANK` — 189 tasks, seen ~169× each. It could reach a
    perfect score by memorizing "always build 3 lines" without learning one thing
@@ -395,8 +438,11 @@ wide enough that watching it is interesting.
 
 Full detail and rationale in [`docs/ROADMAP.md`](ROADMAP.md).
 
-1. **Spend Best-of-N** — measure the gain on a real checkpoint; check
-   `distinct > 1`. Free throughput, and the go/no-go for RL.
+1. ~~**Spend Best-of-N**~~ ✅ *done, §3.2* — +48.7% over greedy for zero training,
+   `distinct = 8.21`, `beat = 4`. The go/no-go for RL says *go*, which is why the
+   rest of this list is about earning the right to use it rather than about RL.
+   Worth re-running on a full-size checkpoint; the numbers above are from a
+   scaled-down one.
 2. **Widen the ambiguous curriculum** — the open half of the work here. Four of
    five families are still rigid; the bank is 189 memorizable tasks. The next
    ambiguous family should be at `move_one_item` scale: multi-source/multi-sink,
