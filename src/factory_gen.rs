@@ -466,8 +466,28 @@ fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     // count to the answer rather than to the scaffold is the entire point.
     let lines = rng.gen_range(1..=BANK_LINES);
     let mut removable = Vec::new();
-    for j in (BANK_LINES - lines)..BANK_LINES {
+    for j in 0..BANK_LINES {
         let y = y0 + j;
+        // `removable` is the region the answer may write to, not the region this
+        // answer happened to fill. The distinction is the whole family: `blank`
+        // observes every cell it does not blank, so listing only the built cells
+        // would leave an unbuilt line *given* as empty — the conditioning would
+        // spell out the line count and the ambiguity would evaporate. Masking
+        // the region instead asks the model the question we mean to ask: how
+        // many lines belong here?
+        removable.extend([
+            grid.idx(x0 + 1, y),
+            grid.idx(x0 + 2, y),
+            grid.idx(x0 + 3, y),
+        ]);
+        // Every line above the sink's own row hands off to a belt running down
+        // the column into the shared sink.
+        if y != sink.1 {
+            removable.push(grid.idx(x0 + 4, y));
+        }
+        if j < BANK_LINES - lines {
+            continue;
+        }
         grid.set(
             x0 + 1,
             y,
@@ -496,16 +516,8 @@ fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
                 ..Default::default()
             },
         );
-        removable.extend([
-            grid.idx(x0 + 1, y),
-            grid.idx(x0 + 2, y),
-            grid.idx(x0 + 3, y),
-        ]);
-        // Every line above the sink's own row hands off to a belt running down
-        // the column into the shared sink.
         if y != sink.1 {
             grid.set(x0 + 4, y, Cell::belt(Direction::South));
-            removable.push(grid.idx(x0 + 4, y));
         }
     }
 
@@ -642,32 +654,50 @@ mod tests {
     /// has several valid answers, which is the precondition for everything
     /// downstream — Best-of-N needs a choice to make, and RL needs a reward that
     /// is not already saturated.
+    ///
+    /// Checked under *both* blankings, and the inpainting one is the load-bearing
+    /// case. [`Sample::blank`] observes every cell it does not blank, so a family
+    /// that lists only its built cells as `removable` hands the model an unbuilt
+    /// line as a given empty tile — the conditioning states the line count and
+    /// the ambiguity is gone. That bug passes a `blank_to_scaffold`-only test
+    /// (which observes nothing but the anchors) and shows up in training, where
+    /// `blank` is what runs.
     #[test]
     fn the_assembler_bank_gives_one_task_several_valid_answers() {
-        let mut answers: HashMap<String, HashSet<String>> = HashMap::new();
-        for seed in 0..2_000u64 {
-            let Some(sample) = generate(LessonKind::AssemblerBank, 11, seed) else {
-                continue;
-            };
-            let (_, observed) = sample.blank_to_scaffold();
-            answers
-                .entry(conditioning(&sample, &observed))
-                .or_default()
-                .insert(answer(&sample, &observed));
-        }
+        for (blanking, observe) in [
+            (
+                "scaffold",
+                &(|s: &Sample| s.blank_to_scaffold().1) as &dyn Fn(&Sample) -> Vec<bool>,
+            ),
+            ("inpaint", &|s: &Sample| {
+                s.blank(None, &mut ChaCha8Rng::seed_from_u64(0)).1
+            }),
+        ] {
+            let mut answers: HashMap<String, HashSet<String>> = HashMap::new();
+            for seed in 0..2_000u64 {
+                let Some(sample) = generate(LessonKind::AssemblerBank, 11, seed) else {
+                    continue;
+                };
+                let observed = observe(&sample);
+                answers
+                    .entry(conditioning(&sample, &observed))
+                    .or_default()
+                    .insert(answer(&sample, &observed));
+            }
 
-        let ambiguous = answers.values().filter(|a| a.len() > 1).count();
-        assert!(
-            ambiguous > 0,
-            "every task still has exactly one answer -- the family is pointless"
-        );
-        // Not a fluke on one task: the family is ambiguous by construction, so
-        // essentially every task it produces should be.
-        assert!(
-            ambiguous * 4 > answers.len() * 3,
-            "only {ambiguous} of {} tasks admit more than one answer",
-            answers.len()
-        );
+            let ambiguous = answers.values().filter(|a| a.len() > 1).count();
+            assert!(
+                ambiguous > 0,
+                "{blanking}: every task still has exactly one answer -- the family is pointless"
+            );
+            // Not a fluke on one task: the family is ambiguous by construction, so
+            // essentially every task it produces should be.
+            assert!(
+                ambiguous * 4 > answers.len() * 3,
+                "{blanking}: only {ambiguous} of {} tasks admit more than one answer",
+                answers.len()
+            );
+        }
         assert!(LessonKind::AssemblerBank.is_ambiguous());
         assert!(LessonKind::all()
             .iter()

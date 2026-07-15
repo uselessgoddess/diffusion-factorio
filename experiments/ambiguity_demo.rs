@@ -15,6 +15,8 @@ use diffusion_factorio::factory_gen::{generate, LessonKind};
 use diffusion_factorio::textual::render;
 use diffusion_factorio::throughput;
 use diffusion_factorio::world::{Entity, Grid};
+use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 
 const SIZE: usize = 11;
 const SEEDS: u64 = 20_000;
@@ -51,7 +53,9 @@ fn main() {
         let Some(sample) = generate(LessonKind::AssemblerBank, SIZE, seed) else {
             continue;
         };
-        let (scaffold, observed) = sample.blank_to_scaffold();
+        // The blanking `train.rs` validates with, so the ambiguity shown here is
+        // the ambiguity the model is actually trained against.
+        let (scaffold, observed) = sample.blank(None, &mut ChaCha8Rng::seed_from_u64(seed));
         by_task
             .entry(task_key(&sample.solution, &observed))
             .or_insert_with(|| (scaffold, BTreeMap::new()))
