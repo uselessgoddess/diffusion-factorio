@@ -117,8 +117,9 @@ fn main() {
             .filter(|answers| answers.len() > 1)
             .count();
         let secs = t0.elapsed().as_secs_f64();
-        // The 5,000-step run drew 5,000 * 32 = 160,000 samples uniformly over the
-        // 4 families feasible at size 11, so ~40,000 landed in each.
+        // A 5,000-step run draws 5,000 * 32 = 160,000 samples uniformly over the
+        // families feasible at this size. All of them are, at size 11: a circuit
+        // line is exactly 11 wide, which is the tightest fit in the curriculum.
         let draws_per_family = 160_000.0 / LessonKind::all().len() as f64;
         let repeats = draws_per_family / answers_per_context.len() as f64;
         println!(

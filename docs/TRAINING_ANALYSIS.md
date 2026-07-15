@@ -80,10 +80,13 @@ stood during this run**:
 | `assembler_line` | 231 | ~173× | 0 |
 | `underground_cross` | 110 | ~364× | 0 |
 
-(Today the same command prints 135 for `assembler_line`, and the per-task
-exposures shift — ~0.8× / ~237× / ~291× — because a fifth family now shares the
-step budget and the assembler is 3×3. Neither change rescues the argument below:
-135 templates seen ~237× each is *more* memorizable than 231 seen ~173×.)
+(Today the same command prints **90** for `assembler_line`, and the per-task
+exposures shift — ~0.6× / ~296× / ~242× — because six families now share the step
+budget, the assembler is 3×3, and vanilla recipes leave a single-source line only
+two of the three recipes to roll. None of it rescues the argument below: 90
+templates seen ~296× each is *more* memorizable than 231 seen ~173×. Every step
+toward realism has made this worse, which is why grid size is now the top of the
+roadmap.)
 
 **The curriculum splits cleanly in half.**
 

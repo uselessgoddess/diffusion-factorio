@@ -94,11 +94,30 @@ inserters** read 0.86 against roughly 1.23, and flat inserters ran about 8% unde
 
 That is a real finding and it lands on us: our `throughput.rs` uses the same
 `INSERTER_RATE = 0.86` and the same simplified assembler model. But note what it
-implies. Parity matters when you are about to trust a *number*. Right now the
-number is not what is wrong — the same 45 tasks admit 45 different answers, and
-the model is scored on a simulator whose ranking, not whose absolute rate, is
-what selects between them. Buying engine parity today would cost a licensed
-install and a non-CI-able test to sharpen a figure that nothing yet depends on.
+implies. Parity matters when you are about to trust a *number*. Mostly we do not
+yet — the same 30 bank tasks admit 3 answers each, and the model is scored on a
+simulator whose *ranking*, not whose absolute rate, is what selects between them.
+Buying engine parity today would cost a licensed install and a non-CI-able test
+to sharpen a figure that little yet depends on.
+
+`CIRCUIT_LINE` is the first place that "little" is not "nothing", and it is worth
+being exact about how far it goes. Its lesson — the second cable feed doubles the
+factory, the third adds nothing — is a claim about where a *cap* sits, and caps
+are exactly where an invented rate can bite.
+
+What is robust is the **plateau**: the cable machine can never emit more than two
+inserters carry, so a third feed is waste at any rate. What is *not* robust is the
+`2.0×`. At `R = 0.86` the machine is input-capped at `R` crafts/s and yields 2
+cable per craft, so it emits `2R` and two inserters carry exactly `2R` — the rate
+cancels and the second feed is worth 2.0×. That cancellation only holds while
+`R ≤ 1.0`, the machine's own crafting cap. At a long-handed `1.23/s` the crafting
+speed binds first: the machine emits 2.0 cable/s, one feed carries 1.23, and the
+second feed is worth **1.63×**, not 2.0×.
+
+So the ranking survives and parity still waits. But "the absolute rate does not
+matter, only the ordering" is no longer free — it is now a property to re-check
+per family rather than assume, and the next lesson that encodes a cap may not
+cancel so cleanly.
 
 **Build it when we first distrust a specific throughput number** — when a
 best-of-N run picks a layout a human can see is worse, or when the model starts
