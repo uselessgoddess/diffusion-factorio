@@ -5,6 +5,7 @@
 //!
 //! * [`world`] — grid / entity representation.
 //! * [`sim`] — functional evaluation (does the factory route items?).
+//! * [`throughput`] — graded evaluation (how *well* does it route them?).
 //! * [`factory_gen`] — procedural lesson generation + blanking.
 //! * [`textual`] — ASCII (de)serialization for debugging & fixtures.
 //! * [`backend`] — burn backend selection (CPU ndarray / GPU wgpu).
@@ -27,5 +28,6 @@ pub mod persist;
 pub mod sample;
 pub mod sim;
 pub mod textual;
+pub mod throughput;
 pub mod train;
 pub mod world;
