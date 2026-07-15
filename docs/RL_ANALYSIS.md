@@ -323,7 +323,43 @@ stays terminal-only.
 
 ---
 
-## 6. The playground / RCON alternative
+## 6. The other two asks: factory sizes, and chains from inputs/outputs
+
+> различным размерам фабрик, генерация целой чепочки схем чисто на основе входы и выходы
+
+**Variable factory sizes are already free, and nobody has measured them.** The
+denoiser is *fully convolutional*: a 3×3 stem, residual blocks of two 3×3 convs,
+and 1×1 conv output heads. Every `Linear` in it acts on the **channel**
+dimension (`hidden → hidden`), never on a flattened board —
+`ResBlock::forward` mean-pools over the spatial dims to build its global vector
+(`src/model.rs:154-165`), which is a reduction, not a fixed-size reshape. So the
+network accepts any H×W, and `sample --size N` already exists. **Train at 11,
+sample at 15 — that experiment costs one command and has never been run.**
+
+The caveat is bottleneck 3, and it is a real one. Receptive field is ±1 from the
+stem and ±2 per block, so at `blocks=6` a cell sees ±13 — a 27×27 window. At
+11×11 that covers the whole board with room to spare, which means **the 5,000-step
+run tells us nothing about how routing behaves once the board exceeds the
+receptive field**. Past that, the only whole-board channel is a single mean-pooled
+hidden vector per block, and mean-pooling a 30×30 board into one vector is a very
+coarse summary to route a bus with. Expect this to be where size generalization
+breaks; measure it before building anything for it.
+
+**Chains from inputs/outputs are the same task we already evaluate, scaled up.**
+`SCRATCH` (`blank_to_scaffold`) *is* the baby version of this ask: the sources and
+the sink are the specification, and everything between them is the model's to
+design — that is "given inputs and outputs, produce the factory". It works 71.7%
+of the time on 11×11 with one assembler. The gap to "a whole chain" is depth
+(multi-step recipes, intermediate products) and size (above), not a different
+paradigm. `ASSEMBLER_BANK` adds the first taste of the "maximally efficient"
+half by making the count of lines a choice the simulator can rank.
+
+The honest sequencing: a chain needs multi-input recipes and multi-tile buildings
+in `world.rs` (bottleneck 4) before it can be posed as a task at all. That is
+curriculum work, and it is the same item as §8.2 — which is another reason it,
+not RL, is next.
+
+## 7. The playground / RCON alternative
 
 > Либо же это сейчас не главное, а главное сейчас это какой-нибудь интерактивный
 > playground или rcon с factorio для runtime inference и проверки схем.
@@ -346,7 +382,7 @@ wide enough that watching it is interesting.
 
 ---
 
-## 7. Next steps, in order
+## 8. Next steps, in order
 
 Full detail and rationale in [`docs/ROADMAP.md`](ROADMAP.md).
 
