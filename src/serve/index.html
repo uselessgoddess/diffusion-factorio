@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>diffusion-factorio — pose a task</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 20px; background: #14171a; color: #d8dee4;
+         font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: #8b949e; margin: 0 0 18px; }
+  .cols { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+  .panel { background: #1b1f24; border: 1px solid #2b3138; border-radius: 8px; padding: 14px; }
+  fieldset { border: 0; margin: 0 0 12px; padding: 0; }
+  legend { color: #8b949e; font-size: 12px; text-transform: uppercase;
+           letter-spacing: .06em; padding: 0 0 6px; }
+  label { display: flex; justify-content: space-between; gap: 10px; margin: 4px 0; }
+  input[type=number], select { background: #14171a; color: #d8dee4;
+    border: 1px solid #343b43; border-radius: 4px; padding: 3px 6px; width: 110px; }
+  button { background: #2b3138; color: #d8dee4; border: 1px solid #414a54;
+    border-radius: 5px; padding: 6px 12px; cursor: pointer; font: inherit; }
+  button:hover { background: #343b43; }
+  button.on { background: #2f6f4f; border-color: #3f8f66; color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  #tools { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  #grid { display: grid; gap: 1px; background: #2b3138; border: 1px solid #2b3138;
+          width: max-content; user-select: none; }
+  .cell { width: 24px; height: 24px; background: #1b1f24; display: flex;
+          align-items: center; justify-content: center; font-size: 11px;
+          cursor: crosshair; }
+  .cell:hover { outline: 1px solid #6d7681; outline-offset: -1px; }
+  .cell.Source { background: #2f6f4f; color: #eaffef; }
+  .cell.Sink   { background: #6f4f2f; color: #ffeede; }
+  .cell.Obstacle { background: #3a3f45; color: #6d7681; }
+  .factory { max-width: 100%; height: auto; border-radius: 4px; }
+  #verdict { margin: 10px 0; font-size: 15px; }
+  .good { color: #56d364; } .bad { color: #f85149; } .muted { color: #8b949e; }
+  #scores { font-family: ui-monospace, monospace; font-size: 12px; color: #8b949e; }
+  textarea { width: 100%; height: 60px; background: #14171a; color: #8b949e;
+             border: 1px solid #343b43; border-radius: 4px; font: 11px ui-monospace, monospace; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+  input[type=range] { flex: 1; }
+  .hint { color: #6d7681; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Pose a task. Watch the model design it.</h1>
+<p class="sub">Paint the ports on the edges of the area — plates in here, gears out there —
+   and leave the middle empty. That is all the model gets.</p>
+
+<div class="cols">
+  <div class="panel">
+    <fieldset>
+      <legend>Paint</legend>
+      <div id="tools"></div>
+      <label>Item carried <select id="item"></select></label>
+      <p class="hint">Click to paint, drag to sweep, right-click to erase.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Area</legend>
+      <label>Width <input type="number" id="width" value="13" min="5" max="32"></label>
+      <label>Height <input type="number" id="height" value="9" min="5" max="32"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Sampling</legend>
+      <label>Candidates <input type="number" id="candidates" value="8" min="1" max="32"></label>
+      <label>Steps <input type="number" id="steps" value="12" min="1" max="64"></label>
+      <label>Temperature <input type="number" id="temperature" value="0.9" min="0" max="3" step="0.1"></label>
+      <label>Seed <input type="number" id="seed" value="0" min="0"></label>
+      <p class="hint">At temperature 0 every candidate is the same greedy draw.</p>
+    </fieldset>
+    <button id="go">Design it</button>
+    <button id="clear">Clear</button>
+  </div>
+
+  <div class="panel">
+    <legend>The task</legend>
+    <div id="grid"></div>
+  </div>
+
+  <div class="panel" style="flex: 1; min-width: 340px;">
+    <legend>What it built</legend>
+    <div id="out"><p class="muted">Nothing yet.</p></div>
+  </div>
+</div>
+
+<script>
+const TOOLS = ["Source", "Sink", "Obstacle", "Erase"];
+const ITEMS = ["IronPlate", "CopperPlate", "IronGear", "CopperCable", "GreenCircuit"];
+const GLYPH = { Source: "S", Sink: "K", Obstacle: "#" };
+
+let tool = "Source";
+let painted = new Map();   // "x,y" -> {entity, item}
+let frames = [], timer = null;
+
+const $ = (id) => document.getElementById(id);
+const key = (x, y) => `${x},${y}`;
+
+function buildTools() {
+  $("tools").innerHTML = "";
+  for (const t of TOOLS) {
+    const b = document.createElement("button");
+    b.textContent = t;
+    b.className = t === tool ? "on" : "";
+    b.onclick = () => { tool = t; buildTools(); };
+    $("tools").append(b);
+  }
+  $("item").innerHTML = "";
+  for (const i of ITEMS) {
+    const o = document.createElement("option");
+    o.value = o.textContent = i;
+    $("item").append(o);
+  }
+  $("item").value = $("item").value || "IronPlate";
+}
+
+function paint(x, y, erase) {
+  if (erase || tool === "Erase") painted.delete(key(x, y));
+  else painted.set(key(x, y), { entity: tool, item: $("item").value });
+  drawGrid();
+}
+
+function drawGrid() {
+  const w = +$("width").value, h = +$("height").value;
+  const g = $("grid");
+  g.style.gridTemplateColumns = `repeat(${w}, 24px)`;
+  g.innerHTML = "";
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = painted.get(key(x, y));
+    const c = document.createElement("div");
+    c.className = "cell" + (p ? " " + p.entity : "");
+    c.textContent = p ? GLYPH[p.entity] : "";
+    if (p && p.entity !== "Obstacle") c.title = `${p.entity} — ${p.item}`;
+    c.onmousedown = (e) => { e.preventDefault(); paint(x, y, e.button === 2); };
+    c.onmouseenter = (e) => { if (e.buttons) paint(x, y, e.buttons === 2); };
+    c.oncontextmenu = (e) => e.preventDefault();
+    g.append(c);
+  }
+  // A cell painted outside a shrunken grid would be posted anyway and rejected.
+  for (const k of [...painted.keys()]) {
+    const [x, y] = k.split(",").map(Number);
+    if (x >= w || y >= h) painted.delete(k);
+  }
+}
+
+function spec() {
+  const pins = [], obstacles = [];
+  for (const [k, v] of painted) {
+    const [x, y] = k.split(",").map(Number);
+    if (v.entity === "Obstacle") obstacles.push([x, y]);
+    else pins.push({ x, y, entity: v.entity, item: v.item });
+  }
+  return {
+    width: +$("width").value, height: +$("height").value, pins, obstacles,
+    candidates: +$("candidates").value, steps: +$("steps").value,
+    temperature: +$("temperature").value, seed: +$("seed").value,
+  };
+}
+
+function show(r) {
+  frames = r.frames;
+  const best = Math.max(...r.candidate_scores).toFixed(3);
+  const worst = Math.min(...r.candidate_scores).toFixed(3);
+  const verdict = r.score > 0
+    ? `<span class="good">delivers ${r.score.toFixed(3)} items/s</span>`
+    : (r.functional
+        ? `<span class="bad">reaches a sink but delivers 0/s</span>`
+        : `<span class="bad">delivers nothing</span>`);
+  const deliveries = r.deliveries.map(d =>
+    `sink (${d.x},${d.y}) wants ${d.item}: ${d.achieved.toFixed(3)}/s`).join("<br>");
+
+  $("out").innerHTML = `
+    <div id="stage">${r.svg}</div>
+    <div class="row">
+      <button id="play">▶ replay</button>
+      <input type="range" id="scrub" min="0" max="${frames.length - 1}" value="${frames.length - 1}">
+      <span class="muted" id="round"></span>
+    </div>
+    <div id="verdict">${verdict}</div>
+    <div class="muted">${deliveries || "no sinks"}</div>
+    <p id="scores">best of ${r.candidate_scores.length}: ${best}/s,
+       worst ${worst}/s, ${r.distinct} distinct ${r.distinct === 1 ? "idea" : "ideas"}</p>
+    ${r.blueprint
+      ? `<textarea readonly>${r.blueprint}</textarea>
+         <p class="hint">Blueprint string — paste into Factorio.</p>`
+      : `<p class="bad">Not importable: ${r.blueprint_error}</p>`}
+    <details><summary class="muted">ASCII</summary><pre>${r.ascii}</pre></details>`;
+
+  $("scrub").oninput = () => showFrame(+$("scrub").value);
+  $("play").onclick = play;
+  showFrame(frames.length - 1);
+  play();
+}
+
+function showFrame(i) {
+  $("stage").innerHTML = frames[i];
+  $("scrub").value = i;
+  $("round").textContent = i === 0 ? "your task" : `round ${i}/${frames.length - 1}`;
+}
+
+function play() {
+  clearInterval(timer);
+  let i = 0;
+  showFrame(0);
+  timer = setInterval(() => {
+    if (++i >= frames.length) { clearInterval(timer); return; }
+    showFrame(i);
+  }, 220);
+}
+
+async function design() {
+  clearInterval(timer);
+  $("go").disabled = true;
+  $("out").innerHTML = `<p class="muted">Denoising…</p>`;
+  try {
+    const res = await fetch("/api/design", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(spec()),
+    });
+    const r = await res.json();
+    if (r.error) $("out").innerHTML = `<p class="bad">${r.error}</p>`;
+    else show(r);
+  } catch (e) {
+    $("out").innerHTML = `<p class="bad">${e}</p>`;
+  } finally {
+    $("go").disabled = false;
+  }
+}
+
+// A default task, so the page does something the moment it loads: plates in on
+// the west edge, gears out on the east, nothing else said.
+function preset() {
+  painted = new Map([
+    ["0,4", { entity: "Source", item: "IronPlate" }],
+    ["12,4", { entity: "Sink", item: "IronGear" }],
+  ]);
+}
+
+$("go").onclick = design;
+$("clear").onclick = () => { painted = new Map(); drawGrid(); };
+$("width").oninput = $("height").oninput = drawGrid;
+buildTools();
+preset();
+drawGrid();
+</script>
+</body>
+</html>
