@@ -2,8 +2,17 @@
 
 This answers the questions in [issue #5](https://github.com/uselessgoddess/diffusion-factorio/issues/5)
 against the run that was posted there (wgpu, 11×11, seed 7, 5,000 steps). Every
-number below is re-derivable: either from the `report.html` embedded JSON of that
-run, or by running `cargo run --release --example task_space`.
+number below comes from the `report.html` embedded JSON of that run, or from
+`cargo run --release --example task_space` **as the curriculum stood at the time
+of that run**.
+
+That last qualifier is load-bearing now. Giving the assembler the 3×3 footprint
+Factorio actually enforces (issue #9) cut `assembler_line` from 231 distinct
+tasks to 135, and adding a fifth family changed how often a 5,000-step run sees
+each one. The curriculum figures below are therefore a **historical record of
+what this run trained on**, not a description of what `task_space` prints today;
+where the two differ the text says so. `docs/ROADMAP.md` carries the current
+numbers.
 
 ## TL;DR
 
@@ -61,7 +70,8 @@ Two consequences:
 ## Is the model actually learning, or memorizing?
 
 `cargo run --release --example task_space` measures the curriculum with no model
-involved. At size 11, 200,000 generator seeds per family:
+involved. At size 11, 200,000 generator seeds per family, **as the four families
+stood during this run**:
 
 | lesson | distinct tasks | seen per 5k-step run | ambiguous |
 |---|---:|---:|---:|
@@ -69,6 +79,11 @@ involved. At size 11, 200,000 generator seeds per family:
 | `move_one_item_chaos` | 200,000+ | ~0.2× | 0 |
 | `assembler_line` | 231 | ~173× | 0 |
 | `underground_cross` | 110 | ~364× | 0 |
+
+(Today the same command prints 135 for `assembler_line`, and the per-task
+exposures shift — ~0.8× / ~237× / ~291× — because a fifth family now shares the
+step budget and the assembler is 3×3. Neither change rescues the argument below:
+135 templates seen ~237× each is *more* memorizable than 231 seen ~173×.)
 
 **The curriculum splits cleanly in half.**
 

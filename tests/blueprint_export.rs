@@ -358,3 +358,76 @@ fn an_entity_is_centred_on_the_tiles_it_covers() {
     // Anchored at (0,0), covering tiles 0..3 on both axes: the centre is 1.5.
     assert_eq!((machine.position.x, machine.position.y), (1.5, 1.5));
 }
+
+/// An inserter's exported `direction` must name the tile it **drops into**.
+///
+/// This is the one convention in the format that is a coin-flip you cannot see
+/// yourself losing: get it backwards and every inserter in every blueprint runs
+/// the wrong way, the factory does nothing in-game, and — exactly as with the
+/// footprint bug — our own simulator scores it as perfect, because our simulator
+/// is reading our own convention back to us.
+///
+/// The reference states the rule from both sides and verified it in a live game
+/// (`factorion-mod/server/blueprint.py:12`, "Inserters' blueprint direction
+/// points to their *drop tile*, not pickup", and `factorion.py:587`, "Blueprint
+/// direction = drop tile; model direction = pickup"). It has to flip by 8 on the
+/// way out because its model points inserters at their *pickup*.
+///
+/// Ours points them at their drop already: `sim::flow_targets` pushes an
+/// inserter's flow to `p + d`, and `throughput::accepts_from` has it pick up
+/// from `p - d`. So our direction and Factorio's mean the same thing and we emit
+/// it unflipped. This test is what makes that a decision rather than an
+/// accident — if either convention is ever inverted, one side of it breaks here.
+#[test]
+fn an_inserter_points_at_the_tile_it_drops_into() {
+    // S i K : the inserter takes from the source behind it and feeds the sink
+    // in front of it.
+    let mut grid = Grid::new(3, 1);
+    grid.set(
+        0,
+        0,
+        Cell {
+            entity: Entity::Source,
+            item: Item::IronPlate,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        1,
+        0,
+        Cell {
+            entity: Entity::Inserter,
+            direction: Direction::East,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        2,
+        0,
+        Cell {
+            entity: Entity::Sink,
+            item: Item::IronPlate,
+            ..Default::default()
+        },
+    );
+
+    // Our half of the claim: east means the plate lands to the east.
+    assert!(
+        diffusion_factorio::sim::item_reaches_sink(&grid),
+        "our own model must agree the inserter feeds the sink to its east"
+    );
+
+    // Factorio's half: direction 4 is east, and Factorio reads it as the drop.
+    let bp = grid_to_blueprint(&grid, "inserter facing").unwrap();
+    let inserter = bp
+        .blueprint
+        .entities
+        .iter()
+        .find(|e| e.name == "inserter")
+        .expect("the inserter must be exported");
+    assert_eq!(
+        inserter.direction,
+        Some(4),
+        "an east-dropping inserter must export as direction 4 (east), unflipped"
+    );
+}
