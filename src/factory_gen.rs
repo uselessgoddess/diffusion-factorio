@@ -28,6 +28,11 @@ pub enum LessonKind {
     MoveOneItemChaos,
     /// Source → inserter → assembler(recipe) → inserter → sink. Adds item.
     AssemblerLine,
+    /// The same craft, but nothing is stamped: obstacles are scattered, the
+    /// machine, source and sink land anywhere, and the belts are *routed*
+    /// between them. The only machine lesson whose task space does not run out —
+    /// see [`gen_assembler_chaos`].
+    AssemblerChaos,
     /// Source → belt → underground(down..up) → belt → sink across a wall.
     /// Exercises misc (underground tags).
     UndergroundCross,
@@ -47,6 +52,7 @@ impl LessonKind {
             LessonKind::MoveOneItem,
             LessonKind::MoveOneItemChaos,
             LessonKind::AssemblerLine,
+            LessonKind::AssemblerChaos,
             LessonKind::UndergroundCross,
             LessonKind::AssemblerBank,
             LessonKind::CircuitLine,
@@ -57,6 +63,7 @@ impl LessonKind {
             LessonKind::MoveOneItem => "MOVE_ONE_ITEM",
             LessonKind::MoveOneItemChaos => "MOVE_ONE_ITEM_CHAOS",
             LessonKind::AssemblerLine => "ASSEMBLER_LINE",
+            LessonKind::AssemblerChaos => "ASSEMBLER_CHAOS",
             LessonKind::UndergroundCross => "UNDERGROUND_CROSS",
             LessonKind::AssemblerBank => "ASSEMBLER_BANK",
             LessonKind::CircuitLine => "CIRCUIT_LINE",
@@ -75,6 +82,9 @@ impl LessonKind {
         match self {
             LessonKind::MoveOneItem | LessonKind::MoveOneItemChaos => 3,
             LessonKind::AssemblerLine => LINE_W,
+            // The machine and its two inserters need 5 across in the worst case;
+            // the rest is room for the router to have somewhere to route.
+            LessonKind::AssemblerChaos => 7,
             LessonKind::UndergroundCross => 7,
             LessonKind::AssemblerBank => LINE_W.max(LINE_H * BANK_LINES),
             LessonKind::CircuitLine => CIRCUIT_W.max(CIRCUIT_H),
@@ -172,6 +182,7 @@ pub fn generate(kind: LessonKind, size: usize, seed: u64) -> Option<Sample> {
             LessonKind::MoveOneItem => gen_move_one_item(size, &mut rng, false),
             LessonKind::MoveOneItemChaos => gen_move_one_item(size, &mut rng, true),
             LessonKind::AssemblerLine => gen_assembler_line(size, &mut rng),
+            LessonKind::AssemblerChaos => gen_assembler_chaos(size, &mut rng),
             LessonKind::UndergroundCross => gen_underground_cross(size, &mut rng),
             LessonKind::AssemblerBank => gen_assembler_bank(size, &mut rng),
             LessonKind::CircuitLine => gen_circuit_line(size, &mut rng),
@@ -202,16 +213,30 @@ fn manhattan(a: (usize, usize), b: (usize, usize)) -> usize {
 /// BFS shortest path over free cells (4-connected), avoiding obstacles and
 /// occupied cells. `start` and `goal` are always passable endpoints. Returns the
 /// path including both endpoints, or `None`.
+///
+/// `avoid` is for cells that are free but must not be built on. The caller that
+/// needs it is [`gen_assembler_chaos`], keeping its belts off the machine's
+/// faces — see there for why a belt allowed to hug a machine breaks the graded
+/// simulator.
 fn bfs_path(
     grid: &Grid,
     start: (usize, usize),
     goal: (usize, usize),
+    avoid: &[(usize, usize)],
 ) -> Option<Vec<(usize, usize)>> {
     let passable = |x: usize, y: usize| -> bool {
         if (x, y) == start || (x, y) == goal {
             return true;
         }
-        !grid.is_obstacle(x, y) && grid.get(x, y).is_empty()
+        if avoid.contains(&(x, y)) {
+            return false;
+        }
+        // `anchor_at`, not `is_empty`: a multi-tile entity stores only its
+        // top-left anchor and leaves the other footprint tiles `Empty` but
+        // claimed (see `world.rs`). `is_empty` reads those as free and routes a
+        // belt straight through the machine. Equivalent for the 1x1 callers this
+        // started with, which is exactly why it was safe until it wasn't.
+        !grid.is_obstacle(x, y) && grid.anchor_at(x, y).is_none()
     };
     let mut prev = vec![usize::MAX; grid.len()];
     let mut seen = vec![false; grid.len()];
@@ -312,7 +337,7 @@ fn gen_move_one_item(size: usize, rng: &mut ChaCha8Rng, chaos: bool) -> Option<S
         },
     );
 
-    let path = bfs_path(&grid, source, sink)?;
+    let path = bfs_path(&grid, source, sink, &[])?;
     // Interior cells (exclude the source and sink endpoints) become belts.
     let interior = &path[1..path.len() - 1];
     if interior.is_empty() {
@@ -444,6 +469,314 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
         protected,
         removable,
     })
+}
+
+/// Obstacles to scatter, as a fraction of the board. Matches the ~10% budget
+/// [`gen_move_one_item`] uses in chaos mode.
+const CHAOS_OBSTACLES: usize = 10;
+
+/// The same craft as [`gen_assembler_line`], with nothing stamped:
+///
+/// ```text
+///   . # . . b b K       S  source        A  assembler (3x3, anchored)
+///   S b b . b # .       K  sink          i  inserter
+///   . . b . i . .       b  belt          #  obstacle
+///   # . b b A A A
+///   . . . . A A A
+///   . . i . A A A
+///   . . b b b b .
+/// ```
+///
+/// Why this family exists: `task_space` counts every other machine lesson at a
+/// handful of distinct layouts — [`LessonKind::AssemblerLine`] has **2**, one per
+/// recipe — because they place a fixed template at
+/// `rng.gen_range(0..=(size - W))` and vary nothing else. The rest of their
+/// apparent task space is the same picture at another offset, and the denoiser
+/// is `same`-padded convolution end to end, so translation is the one variation
+/// it already generalizes over for free. A bigger board multiplies the offsets
+/// and not the layouts; see `docs/ROADMAP.md` bottleneck 0.
+///
+/// [`LessonKind::MoveOneItemChaos`] is the family that does not have this
+/// problem (200,000 distinct layouts from 200,000 seeds, at every size), and the
+/// reason is that it does not stamp: obstacles go into the conditioning plane
+/// and the belts are derived by BFS *through* them, so the label is a function
+/// of a world the model can see. This applies that to the craft:
+///
+/// * obstacles are scattered first, and the router has to respect them;
+/// * the machine, the source and the sink land anywhere they fit;
+/// * both inserters attach to whichever faces of the machine were free;
+/// * the belts are whatever BFS finds, so the answer depends on the obstacles
+///   rather than ignoring them.
+///
+/// Placing obstacles that the answer *ignores* would be worse than useless: it
+/// inflates every distinctness count while teaching nothing. What makes them
+/// count is that they are in the path.
+fn gen_assembler_chaos(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    if size < LessonKind::AssemblerChaos.min_size() {
+        return None;
+    }
+    let mut grid = Grid::new(size, size);
+    for _ in 0..(size * size / CHAOS_OBSTACLES).max(1) {
+        let (x, y) = random_cell(size, rng);
+        grid.set_obstacle(x, y, true);
+    }
+
+    let recipe = *Item::single_input_craftable().choose(rng).unwrap();
+    let input_item = recipe.ingredients()[0].item;
+
+    // The machine, wherever its nine tiles happen to be free.
+    let (ax, ay) = (rng.gen_range(0..=(size - 3)), rng.gen_range(0..=(size - 3)));
+    if (ax..ax + 3).any(|x| (ay..ay + 3).any(|y| grid.is_obstacle(x, y))) {
+        return None;
+    }
+    grid.set(
+        ax,
+        ay,
+        Cell {
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item: recipe,
+            misc: Misc::None,
+        },
+    );
+
+    // Two distinct free faces: one to load, one to unload. `perimeter` is in
+    // anchor coordinates and already excludes the footprint itself. A corner of
+    // the ring touches the machine only diagonally and no inserter can reach it,
+    // so `dir_toward_footprint` rejects it here rather than three checks later.
+    let mut faces: Vec<(usize, usize)> = grid
+        .perimeter(ax, ay)
+        .into_iter()
+        .filter(|&(x, y)| !grid.is_obstacle(x, y) && grid.anchor_at(x, y).is_none())
+        .filter(|&f| dir_toward_footprint(&grid, f, (ax, ay)).is_some())
+        .collect();
+    faces.shuffle(rng);
+    let (&load, &unload) = (faces.first()?, faces.get(1)?);
+
+    // Every other face is off limits to the router. A machine offers its output
+    // to its whole perimeter (`sim::flow_targets`), so a belt merely *passing* a
+    // face picks the output up -- and when that belt is the inbound one, the
+    // gears ride it back to the loading inserter and into the machine that made
+    // them. `item_reaches_sink` still says yes (the sink is reachable), but the
+    // graded simulator has to topologically sort a cycle and scores the factory
+    // zero. Factorio agrees for its own reason: an assembler will not feed an
+    // adjacent belt, and a layout that needs it to is not buildable.
+    let keep_clear: Vec<(usize, usize)> = faces
+        .iter()
+        .copied()
+        .filter(|&f| f != load && f != unload)
+        .collect();
+
+    // An inserter reaches exactly one tile behind it and drops exactly one tile
+    // ahead (`throughput::accepts_from`). So the belts are *not* free to meet an
+    // inserter at whichever face the router likes: machine, inserter and belt
+    // have to be colinear. The loader faces the machine and therefore takes from
+    // `pickup`, directly behind it; the unloader faces away and puts down on
+    // `drop`, directly in front. Those two cells are where the routes must end
+    // and begin -- not `load` and `unload` themselves.
+    //
+    // Getting this wrong is what the first draft did, and neither simulator
+    // objected loudly. `item_reaches_sink` only asks whether the sink is
+    // reachable, and it was: the outbound belt started on the machine's
+    // perimeter, so the machine fed it directly and the unloading inserter --
+    // aimed at whatever face BFS happened to leave by, picking up from empty
+    // ground behind it -- was scenery. Only the graded metric noticed, by
+    // scoring the whole factory zero.
+    let into_machine = dir_toward_footprint(&grid, load, (ax, ay))?;
+    let away = dir_toward_footprint(&grid, unload, (ax, ay))?.opposite();
+    let pickup = step(load, into_machine.opposite(), size)?;
+    let drop = step(unload, away, size)?;
+
+    let source = random_cell(size, rng);
+    let sink = random_cell(size, rng);
+    for &c in &[source, sink, pickup, drop] {
+        if grid.is_obstacle(c.0, c.1) || grid.anchor_at(c.0, c.1).is_some() {
+            return None;
+        }
+        // Nor may any of them sit on a face: a sink touching the machine is fed
+        // without ever needing the inserter, and a belt touching it is handed
+        // the machine's output for free.
+        if keep_clear.contains(&c) {
+            return None;
+        }
+    }
+    // A source is an *unlimited* supply, and like a machine it offers to every
+    // neighbour rather than to the one belt it was drawn for. Where a machine's
+    // stray offer makes a cycle, a source's quietly poisons: `throughput` seeds
+    // it with `f64::INFINITY`, and `clamp_total` hands an unlimited supply the
+    // whole belt and crowds every finite one off it. So a plate source touching
+    // the gear line does not add plates to it -- it *replaces* the gears, the
+    // sink filters the plates out as the wrong item, and a factory whose every
+    // belt is correct delivers zero. It cost a quarter of this family before
+    // `experiments/why_zero.rs` pinned it down.
+    // `drop` is placed before either route, so unlike the rest of the gear line
+    // it cannot simply be routed around.
+    if neighbours(source, size).contains(&drop) {
+        return None;
+    }
+    // Everything downstream assumes these six cells are six cells.
+    let named = [source, sink, load, unload, pickup, drop];
+    if (0..named.len()).any(|i| named[i + 1..].contains(&named[i])) {
+        return None;
+    }
+    grid.set(
+        source.0,
+        source.1,
+        Cell {
+            entity: Entity::Source,
+            item: input_item,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        sink.0,
+        sink.1,
+        Cell {
+            entity: Entity::Sink,
+            item: recipe,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        load.0,
+        load.1,
+        Cell {
+            entity: Entity::Inserter,
+            direction: into_machine,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        unload.0,
+        unload.1,
+        Cell {
+            entity: Entity::Inserter,
+            direction: away,
+            ..Default::default()
+        },
+    );
+    // The two belts the inserters actually touch, placed before either route so
+    // the router cannot lay a belt across them and have it overwritten. `pickup`
+    // hands the loader its plates, so it points at it. `drop` is where the
+    // unloader puts the gears down, and which way it carries them on is up to
+    // the route -- fixed below.
+    grid.set(pickup.0, pickup.1, Cell::belt(into_machine));
+    grid.set(drop.0, drop.1, Cell::belt(away));
+
+    // Route in, then out. The second route runs on a grid that already holds the
+    // first one's belts, so the two cannot claim the same cell.
+    let mut removable = vec![
+        grid.idx(load.0, load.1),
+        grid.idx(unload.0, unload.1),
+        grid.idx(pickup.0, pickup.1),
+        grid.idx(drop.0, drop.1),
+    ];
+    let (inbound, _) = belt_run(&mut grid, source, pickup, &keep_clear)?;
+    removable.extend(inbound);
+    // The outbound route carries gears and so has one more cell to stay off than
+    // the inbound one, which carries what the source is already full of: the
+    // source's own neighbours. Only the outbound route needs this. A plate belt
+    // brushing the plate source picks up more of what it is already carrying,
+    // which is harmless -- the crowding-out only bites when the items differ.
+    let mut gear_keep_clear = keep_clear.clone();
+    gear_keep_clear.extend(neighbours(source, size));
+    let (outbound, out_dir) = belt_run(&mut grid, drop, sink, &gear_keep_clear)?;
+    removable.extend(outbound);
+    grid.set(drop.0, drop.1, Cell::belt(out_dir));
+
+    if !item_reaches_sink(&grid) {
+        return None;
+    }
+    // The task is "plates arrive here, gears are wanted there, and the machine
+    // is here" -- the belts and the inserters are the answer.
+    let protected = vec![
+        grid.idx(source.0, source.1),
+        grid.idx(sink.0, sink.1),
+        grid.idx(ax, ay),
+    ];
+    Some(Sample {
+        kind: LessonKind::AssemblerChaos,
+        solution: grid,
+        protected,
+        removable,
+    })
+}
+
+/// The up-to-four cells orthogonally adjacent to `pos` and still on the board.
+///
+/// Which is exactly the set a 1x1 entity offers its output to, so it is also the
+/// set a belt has to stay out of to avoid being offered something.
+fn neighbours(pos: (usize, usize), size: usize) -> Vec<(usize, usize)> {
+    [
+        Direction::North,
+        Direction::South,
+        Direction::East,
+        Direction::West,
+    ]
+    .into_iter()
+    .filter_map(|d| step(pos, d, size))
+    .collect()
+}
+
+/// One step from `pos` along `d`, or `None` if that leaves the board.
+fn step(pos: (usize, usize), d: Direction, size: usize) -> Option<(usize, usize)> {
+    let (dx, dy) = d.delta();
+    let (x, y) = (pos.0 as i32 + dx, pos.1 as i32 + dy);
+    (x >= 0 && y >= 0 && (x as usize) < size && (y as usize) < size)
+        .then_some((x as usize, y as usize))
+}
+
+/// The direction from a perimeter cell into the footprint anchored at `anchor`.
+/// `None` for a cell that only touches the footprint diagonally.
+fn dir_toward_footprint(
+    grid: &Grid,
+    from: (usize, usize),
+    anchor: (usize, usize),
+) -> Option<Direction> {
+    let body = grid.footprint_at(anchor.0, anchor.1);
+    [
+        Direction::North,
+        Direction::East,
+        Direction::South,
+        Direction::West,
+    ]
+    .into_iter()
+    .find(|d| {
+        let (dx, dy) = d.delta();
+        body.contains(&(from.0 as i32 + dx, from.1 as i32 + dy))
+    })
+}
+
+/// Lay a belt run from `start` to `goal`, exclusive of both, each belt facing
+/// the next cell along the route. Returns the indices it wrote, and the
+/// direction the route leaves `start` by.
+///
+/// `start` and `goal` are the *endpoints that already exist* — a source and an
+/// inserter, say. `bfs_path` treats them as passable and everything occupied as
+/// not, so the run threads between what is already on the board.
+///
+/// The returned direction is what lets a caller point an inserter at the route
+/// instead of guessing where the route will go. When `start` and `goal` are
+/// already adjacent there are no belts to write, and it is the direction from
+/// one to the other — still the way out of `start`, still correct to face.
+fn belt_run(
+    grid: &mut Grid,
+    start: (usize, usize),
+    goal: (usize, usize),
+    avoid: &[(usize, usize)],
+) -> Option<(Vec<usize>, Direction)> {
+    let path = bfs_path(grid, start, goal, avoid)?;
+    // `None` rather than a panic when `start == goal`: a caller that routed a
+    // cell to itself has a bug, but the retry loop in `generate` is the right
+    // place to notice, not an index out of bounds.
+    let out = dir_between(start, *path.get(1)?);
+    let interior = &path[1..path.len() - 1];
+    let mut idx = Vec::with_capacity(interior.len());
+    for (i, &pos) in interior.iter().enumerate() {
+        grid.set(pos.0, pos.1, Cell::belt(dir_between(pos, path[i + 2])));
+        idx.push(grid.idx(pos.0, pos.1));
+    }
+    Some((idx, out))
 }
 
 /// A bank of parallel assembler lines feeding one shared sink, each machine
@@ -1054,6 +1387,115 @@ mod tests {
             }
             assert!(ok > 0, "lesson {} never generated", kind.name());
         }
+    }
+
+    /// An inserter that pushes into an empty tile is decorative, and a factory
+    /// that needs it to be decorative is not buildable.
+    ///
+    /// [`gen_assembler_chaos`] shipped this bug and the simulator waved it
+    /// through: it picked the unloading inserter's direction from the machine's
+    /// geometry, then let BFS route the belt out of some *other* face, leaving
+    /// the inserter aimed at nothing. `item_reaches_sink` still said yes, because
+    /// `flow_targets` lets an assembler offer to its whole perimeter, and the
+    /// first belt of the run was standing on that perimeter — so the machine fed
+    /// the belt directly and the inserter was scenery. Factorio has no such
+    /// shortcut, and a model trained on it would learn to place inserters that
+    /// mean nothing. The simulator cannot catch this, so a test has to.
+    #[test]
+    fn every_inserter_pushes_into_something_real() {
+        for &kind in LessonKind::all() {
+            for seed in 0..60u64 {
+                let Some(s) = generate(kind, 11, seed) else {
+                    continue;
+                };
+                let g = &s.solution;
+                for y in 0..g.height {
+                    for x in 0..g.width {
+                        if g.get(x, y).entity != Entity::Inserter {
+                            continue;
+                        }
+                        let (dx, dy) = g.get(x, y).direction.delta();
+                        let (tx, ty) = (x as i32 + dx, y as i32 + dy);
+                        assert!(
+                            tx >= 0
+                                && ty >= 0
+                                && (tx as usize) < g.width
+                                && (ty as usize) < g.height,
+                            "{}: inserter at ({x},{y}) faces off the board",
+                            kind.name()
+                        );
+                        assert!(
+                            g.anchor_at(tx as usize, ty as usize).is_some(),
+                            "{}: inserter at ({x},{y}) pushes into an empty tile (seed {seed})",
+                            kind.name()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The measurement that justifies this whole family, small enough to run in
+    /// CI: `experiments/task_space` counts the *answers* each lesson teaches —
+    /// the cells the model must fill, with translation collapsed, because the
+    /// denoiser is `same`-padded convolution and slides for free.
+    ///
+    /// [`LessonKind::AssemblerLine`] scores **one**. Not one per recipe: the
+    /// recipe lives on the assembler, which is protected scaffold, so every
+    /// task's answer is the same constant picture of belts and inserters. A
+    /// 5,000-step run draws it ~23,000 times. That is the bottleneck, and it is
+    /// exactly as bad on a bigger board — a wider grid buys offsets, which cost
+    /// compute and teach nothing (`docs/ROADMAP.md` bottleneck 0).
+    #[test]
+    fn the_chaos_family_teaches_answers_and_the_templated_one_teaches_a_constant() {
+        /// The answer alone, normalized to its own bounding box.
+        fn answer_shape(s: &Sample) -> String {
+            let g = &s.solution;
+            let cells: Vec<(usize, usize, Cell)> = s
+                .removable
+                .iter()
+                .map(|&i| (i % g.width, i / g.width, g.cells[i]))
+                .collect();
+            let min_x = cells.iter().map(|&(x, _, _)| x).min().unwrap();
+            let min_y = cells.iter().map(|&(_, y, _)| y).min().unwrap();
+            let mut keys: Vec<String> = cells
+                .iter()
+                .map(|&(x, y, c)| {
+                    format!(
+                        "{},{}:{}:{}:{}:{}",
+                        x - min_x,
+                        y - min_y,
+                        c.entity as u8,
+                        c.direction as u8,
+                        c.item as u8,
+                        c.misc as u8
+                    )
+                })
+                .collect();
+            keys.sort();
+            keys.join(";")
+        }
+
+        let shapes = |kind| -> usize {
+            (0..200u64)
+                .filter_map(|seed| generate(kind, 11, seed))
+                .map(|s| answer_shape(&s))
+                .collect::<HashSet<_>>()
+                .len()
+        };
+
+        assert_eq!(
+            shapes(LessonKind::AssemblerLine),
+            1,
+            "the templated line is supposed to teach exactly one answer -- if this \
+             moved, the premise of ASSEMBLER_CHAOS changed and the docs are stale"
+        );
+        let chaos = shapes(LessonKind::AssemblerChaos);
+        assert!(
+            chaos > 150,
+            "ASSEMBLER_CHAOS gave only {chaos} distinct answers in 200 seeds; it is \
+             stamping a template again"
+        );
     }
 
     #[test]

@@ -33,6 +33,8 @@ struct Family {
     factories: usize,
     /// [`factories`](Self::factories) with translations collapsed.
     shapes: usize,
+    /// Distinct *answers* modulo translation — see [`answer_shape_key`].
+    answer_shapes: usize,
 }
 
 /// Canonical key for a full factory. Uses every channel (the ASCII view is
@@ -132,6 +134,50 @@ fn answer_key(g: &Grid, observed: &[bool]) -> String {
     s
 }
 
+/// Canonical key for the *answer alone*, modulo translation: the cells the model
+/// has to fill in, normalized to their own bounding box, with the world they sit
+/// in thrown away.
+///
+/// [`translation_invariant_key`] keys the whole board, obstacles included, and
+/// that makes it gameable in exactly one way: scatter random obstacles, and every
+/// sample gets a distinct key whether or not the answer ever changes. It would
+/// have scored a lesson that generates noise the label ignores as infinitely
+/// varied. Since the fix for the templated families *is* to scatter obstacles
+/// ([`LessonKind::AssemblerChaos`]), that is the one number it must not be
+/// allowed to inflate, so this counts what the model is actually asked to
+/// produce.
+///
+/// Distinctness here is still not sufficient — two belt runs differing in one
+/// tile are two keys and nearly one lesson — but it is necessary, and it is what
+/// separates a family that varies its answers from one that varies its wallpaper.
+fn answer_shape_key(g: &Grid, observed: &[bool]) -> String {
+    let cells: Vec<(usize, usize, Cell)> = observed
+        .iter()
+        .enumerate()
+        .filter(|&(_, &obs)| !obs)
+        .map(|(i, _)| (i % g.width, i / g.width, g.cells[i]))
+        .filter(|(_, _, c)| !c.is_empty())
+        .collect();
+    let Some(min_x) = cells.iter().map(|&(x, _, _)| x).min() else {
+        return String::new();
+    };
+    let min_y = cells.iter().map(|&(_, y, _)| y).min().unwrap();
+
+    let mut s = String::new();
+    for (x, y, c) in cells {
+        s.push_str(&format!(
+            "{},{}:{}:{}:{}:{};",
+            x - min_x,
+            y - min_y,
+            c.entity as u8,
+            c.direction as u8,
+            c.item as u8,
+            c.misc as u8
+        ));
+    }
+    s
+}
+
 fn main() {
     let size: usize = std::env::args()
         .nth(1)
@@ -155,6 +201,7 @@ fn main() {
         let t0 = Instant::now();
         let mut factories = HashSet::new();
         let mut shapes = HashSet::new();
+        let mut answer_shapes = HashSet::new();
         let mut generated = 0usize;
         // (conditioning -> set of distinct answers) proves whether the label is a
         // deterministic function of what the model conditions on.
@@ -172,6 +219,7 @@ fn main() {
             // removable cell, keep the protected scaffold observed.
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let (_partial, observed) = sample.blank(None, &mut rng);
+            answer_shapes.insert(answer_shape_key(&sample.solution, &observed));
             answers_per_context
                 .entry(conditioning_key(&sample.solution, &observed))
                 .or_default()
@@ -212,6 +260,7 @@ fn main() {
             ambiguous,
             factories: factories.len(),
             shapes: shapes.len(),
+            answer_shapes: answer_shapes.len(),
         });
     }
 
@@ -237,19 +286,24 @@ fn main() {
     println!("  free. Collapsing translations is therefore the honest count of what");
     println!("  a family actually teaches:\n");
     println!(
-        "  {:<22} {:>10} {:>8} {:>12}",
-        "family", "factories", "shapes", "of which new"
+        "  {:<22} {:>10} {:>8} {:>13} {:>9}",
+        "family", "factories", "shapes", "of which new", "answers"
     );
     for f in &totals {
         let slide = f.factories as f64 / f.shapes.max(1) as f64;
         println!(
-            "  {:<22} {:>10} {:>8} {:>11.0}x translation",
-            f.name, f.factories, f.shapes, slide
+            "  {:<22} {:>10} {:>8} {:>11.0}x translation {:>7}",
+            f.name, f.factories, f.shapes, slide, f.answer_shapes
         );
     }
     println!("\n  A family whose `shapes` count stays flat as SIZE grows is not gaining");
     println!("  task space on a bigger board -- it is gaining offsets. Compare two");
     println!("  sizes to see which of these numbers actually move.");
+    println!("\n  `answers` is the column to trust. `shapes` keys the whole board,");
+    println!("  obstacles and all, so any family that scatters obstacles scores a");
+    println!("  perfect count for free -- whether or not the obstacles change the");
+    println!("  label. `answers` keys only the cells the model must fill in, modulo");
+    println!("  translation, so it is the one number a chaos family cannot fake.");
 
     println!("\n=== 2. Is `exact` a fair metric? (is the target label unique?) ===");
     let (rigid, ambiguous): (Vec<_>, Vec<_>) = totals.iter().partition(|f| f.ambiguous == 0);
