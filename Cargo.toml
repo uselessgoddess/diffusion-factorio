@@ -43,3 +43,7 @@ path = "experiments/blueprint_schema.rs"
 [[example]]
 name = "ambiguity_demo"
 path = "experiments/ambiguity_demo.rs"
+
+[[example]]
+name = "overlap_check"
+path = "experiments/overlap_check.rs"

@@ -105,15 +105,28 @@ and `cargo run --release --example task_space`. The 5,000-step GPU run reached
 **Mitigations in place:** from-scratch validation (`Sample::blank_to_scaffold`)
 masks everything but the source/sink, so the model must *design*, not inpaint;
 `val_batch` default 64 → 512; `functional` is now item-aware; and
-**`ASSEMBLER_BANK` breaks the ambiguity floor** — 189 tasks at size 11, *all
-189* admitting 3 valid answers that deliver 1×/2×/3×:
+**`ASSEMBLER_BANK` breaks the ambiguity floor** — every one of its tasks admits
+3 valid answers, delivering 1×/2×/3×:
 
 ```
-ASSEMBLER_BANK   distinct factories: 567 | distinct tasks: 189 | ambiguous tasks: 189
+ASSEMBLER_LINE   distinct factories:    135 | distinct tasks:    135 | ambiguous tasks:  0
+ASSEMBLER_BANK   distinct factories:    135 | distinct tasks:     45 | ambiguous tasks: 45
 ```
 
 Re-derive with `cargo run --release --example task_space`; see one task and its
 three answers with `cargo run --release --example ambiguity_demo`.
+
+**Giving the machines their real size made this worse, and that is worth stating
+plainly.** A bank of three assembler lines is 7×9 once the assemblers are 3×3
+instead of 1×1, and a 7×9 box has far fewer placements in an 11×11 grid than the
+fictional narrow one did: the family fell from **189 tasks to 45** (~169× → ~711×
+seen per task), and `ASSEMBLER_LINE` from 231 to 135. The ambiguity is untouched
+(45 of 45, still 3 answers each), so what step 4 below bought is intact — but the
+templated families are now *more* memorizable than the numbers quoted above them,
+and the honest fix is not to shrink the machines back. **It is that size 11 is too
+small a canvas for a real 3×3 machine**, which is the same conclusion bottleneck 0
+reaches from the other direction. Grid size is the knob; see the open half of
+step 4.
 
 A caution learned the hard way here: `Sample::blank` observes every cell it does
 not blank, so `removable` must list the region an answer *may* build, not the
@@ -175,13 +188,12 @@ file:
   gives this for free; no cycle check needed.
 - **No lanes — and the roadmap used to ask for them anyway.** The reference
   splits each belt tile into left/right lane nodes to model sideloading. That is
-  vacuous *here*: our entities are 1×1, an inserter has exactly one pickup tile,
-  and belt merging is already handled by the per-tile cap. Porting lanes would
-  have added nodes that can never differ. The real limitation is the **world
-  model** (1×1 entities, no lanes, no sideloading), not the throughput port —
-  so "lane-aware throughput" was the wrong next step and is not one now. If we
-  want lanes, they belong in `world.rs` first, and bottleneck 4 is where that
-  lives.
+  vacuous *here*: an inserter has exactly one pickup tile, and belt merging is
+  already handled by the per-tile cap. Porting lanes would have added nodes that
+  can never differ. The real limitation is the **world model** (no lanes, no
+  sideloading), not the throughput port — so "lane-aware throughput" was the
+  wrong next step and is not one now. If we want lanes, they belong in
+  `world.rs` first, and bottleneck 4 is where that lives.
 
 Also fixed earlier: `item_reaches_sink` was **item-blind**, scoring "belt raw
 plate straight into a gear sink" as functional — i.e. rewarding *skipping* the
@@ -195,10 +207,33 @@ whether functional-rate scales with grid size.
 
 ### 4. Curriculum breadth & realism
 Four hand-built lessons exercise every channel but are small and templated. Real
-Factorio layouts are richer (3×3 assemblers, multi-input recipes, buses).
-**Next:** grow the lesson set (true multi-tile buildings, branching buses),
-weight the curriculum by difficulty, and add held-out lesson kinds to measure
-generalization.
+Factorio layouts are richer (multi-input recipes, buses, furnaces).
+
+Machines are now the size they are in Factorio — an assembler covers 3×3, a
+splitter 2×1 — stored at their top-left anchor with the rest of the footprint
+`Empty` but claimed (`Grid::anchor_at`, `Grid::footprints_are_legal`). This was
+not cosmetic: `blueprint.rs` had always exported a *real* 3×3
+`assembling-machine-1` at the assembler's cell, so while the world model kept
+1×1 machines every `ASSEMBLER_LINE` blueprint we emitted placed the machine on
+top of its own inserters and Factorio refused the import
+(`experiments/overlap_check.rs` reproduces the collisions). The model was being
+taught a shape that cannot be built.
+
+The footprint also unblocks the recipe simplification. Every `Recipe` here names
+a *single* ingredient — our electronic circuit needs only an iron plate, where
+vanilla needs 3 copper cable **and** 1 iron plate. That used to be forced by
+geometry: a 1×1 machine has one tile in front and one behind, so there is
+nowhere to put a second input. A 3×3 machine has twelve perimeter slots
+(`Grid::perimeter`) and can be fed from as many sides as a recipe needs. What
+still stands in the way is two things, neither of them the world: `Recipe`'s
+single-`ingredient` field, and `sim.rs`'s reachability check, which walks a
+single carried item and so cannot say "this machine runs only once *both* inputs
+arrive". `throughput.rs` already can — it propagates a per-item flow vector and
+sums every predecessor.
+
+**Next:** multi-ingredient recipes (a real electronic circuit), a 2×2 furnace to
+prove the footprint machinery is not 3×3-shaped, branching buses, curriculum
+weighting by difficulty, and held-out lesson kinds to measure generalization.
 
 ### 5. Compute path — the GPU is idle, and the schedule wastes 40% of the run
 Not a wall, but free money. Profiled from the 5,000-step run's report:
@@ -232,8 +267,8 @@ see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
    comparable one (and even then the world models differ).
 2. **Graded throughput** ✅ *(this branch)* — `src/throughput.rs`, power mean at
    `p=0.5`. What makes one working factory rankable against another; everything
-   below was blocked on it. Dropped the "lane-aware" qualifier: lanes are vacuous
-   in a 1×1 world model (see bottleneck 2).
+   below was blocked on it. Dropped the "lane-aware" qualifier: a world without
+   lanes cannot tell two lane nodes apart (see bottleneck 2).
 3. **Best-of-N sampling, verified by the simulator** ✅ *(this branch)* —
    `src/best_of_n.rs` and `sample --best-of N --temperature T`. Draw N layouts,
    simulate each, keep the best; needs **no retraining** because the sampler is
@@ -243,13 +278,16 @@ see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
    `N` will help.
 4. **A curriculum that admits many answers** ✅ *(this branch)* —
    `ASSEMBLER_BANK`: 3 sources and a shared sink are the task, and how many of
-   the 3 assembler lines to build is the answer. All 189 tasks admit all 3
+   the 3 assembler lines to build is the answer. All 45 tasks admit all 3
    answers, delivering 1×/2×/3×. This is what gives steps 2 and 3 something to
    do and what makes `beat_original` reachable at all.
    **Still open:** the other four families remain rigid, and the bank is a small,
-   memorizable family (189 tasks seen ~169× each). The next ambiguous family
-   should be at `move_one_item` scale — multi-source/multi-sink, several recipes,
-   tighter obstacle budgets, true 3×3 assemblers and 2×1 splitters.
+   memorizable family — and giving the assemblers their real 3×3 footprint shrank
+   it further, from 189 tasks to 45 (~711× each). **Raising the grid size is now
+   the prerequisite**, not a nice-to-have: a 7×9 bank barely fits an 11×11 board,
+   so there is nowhere left to put it. The next ambiguous family should be at
+   `move_one_item` scale — multi-source/multi-sink, several recipes, tighter
+   obstacle budgets — on a canvas big enough to hold real machines.
 5. **Tune the imbalance knobs** — sweep `structure_weight`, add focal loss,
    compare mean-CE vs `--elbo`.
 6. **Cheap architecture wins from the reference** — 1×1-conv tile head → softmax
@@ -272,7 +310,7 @@ see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
      passes" rather than "better than nothing". See
      [`RL_ANALYSIS.md` §3.2](RL_ANALYSIS.md).
    - **One ambiguous family out of five is a thin base.** RL would optimise
-     throughput on `ASSEMBLER_BANK` — 189 memorizable tasks — and could simply
+     throughput on `ASSEMBLER_BANK` — 45 memorizable tasks — and could simply
      memorise "always build 3 lines" without learning anything about design.
      Widen the ambiguous curriculum first (step 4's open half).
    - **The simulator has not been parity-checked** (step 7). RL optimises the

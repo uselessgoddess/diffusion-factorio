@@ -317,19 +317,48 @@ fn gen_move_one_item(size: usize, rng: &mut ChaCha8Rng, chaos: bool) -> Option<S
     })
 }
 
+/// Columns one crafting line occupies: source, inserter, the machine's three,
+/// inserter, sink.
+const LINE_W: usize = 7;
+
+/// Rows one crafting line occupies — the machine's three. The line itself runs
+/// along the middle one.
+const LINE_H: usize = 3;
+
+/// A crafting line, with the machine covering the nine tiles a real
+/// `assembling-machine-1` covers:
+///
+/// ```text
+///   . . A A A . .
+///   S i A A A i K
+///   . . A A A . .
+/// ```
+///
+/// This lesson used to be `S i a i K` on a single row, with the assembler
+/// occupying one cell "simplified from the reference's 3×3 to keep the first
+/// model tractable". The simplification was not free and not local: `blueprint.rs`
+/// has always anchored a *real* 3×3 `assembling-machine-1` at that cell, so every
+/// blueprint this lesson ever exported placed the machine on top of its own two
+/// inserters and Factorio rejected the import outright
+/// (`experiments/overlap_check.rs` reproduces it). The model was being taught a
+/// shape that cannot be built.
+///
+/// Only the anchor at (x0+2, y0) stores the machine; the other eight tiles stay
+/// `Empty` and are reached through [`Grid::anchor_at`]. See `world.rs` for why
+/// the shadow is implied rather than stamped.
 fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
-    // Horizontal line: S i a i K  (needs width >= 5). Assembler is 1×1 here
-    // (simplified from the reference's 3×3) to keep the first model tractable.
-    if size < 5 {
+    if size < LINE_W || size < LINE_H {
         return None;
     }
-    let y = rng.gen_range(0..size);
-    let x0 = rng.gen_range(0..=(size - 5));
+    let y0 = rng.gen_range(0..=(size - LINE_H));
+    let x0 = rng.gen_range(0..=(size - LINE_W));
     let recipe = *Item::craftable().choose(rng).unwrap();
     let input_item = recipe
         .ingredient()
         .expect("every craftable recipe has an ingredient");
 
+    // The machine's middle row: the one the line runs along.
+    let y = y0 + 1;
     let mut grid = Grid::new(size, size);
     grid.set(
         x0,
@@ -351,7 +380,7 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     );
     grid.set(
         x0 + 2,
-        y,
+        y0,
         Cell {
             entity: Entity::Assembler,
             direction: Direction::East,
@@ -360,7 +389,7 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
         },
     );
     grid.set(
-        x0 + 3,
+        x0 + 5,
         y,
         Cell {
             entity: Entity::Inserter,
@@ -369,7 +398,7 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
         },
     );
     grid.set(
-        x0 + 4,
+        x0 + 6,
         y,
         Cell {
             entity: Entity::Sink,
@@ -382,8 +411,8 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
         return None;
     }
     // Assembler (recipe) is protected; the two inserters are removable.
-    let protected = vec![grid.idx(x0, y), grid.idx(x0 + 2, y), grid.idx(x0 + 4, y)];
-    let removable = vec![grid.idx(x0 + 1, y), grid.idx(x0 + 3, y)];
+    let protected = vec![grid.idx(x0, y), grid.idx(x0 + 2, y0), grid.idx(x0 + 6, y)];
+    let removable = vec![grid.idx(x0 + 1, y), grid.idx(x0 + 5, y)];
     Some(Sample {
         kind: LessonKind::AssemblerLine,
         solution: grid,
@@ -392,12 +421,19 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     })
 }
 
-/// A bank of parallel assembler lines feeding one shared sink:
+/// A bank of parallel assembler lines feeding one shared sink, each machine
+/// three tiles on a side and so each line three rows tall:
 ///
 /// ```text
-///   S i a i b(South)
-///   S i a i b(South)
-///   S i a i K
+///   . . A A A . .
+///   S i A A A i b(South)
+///   . . A A A . b(South)
+///   . . A A A . b(South)
+///   S i A A A i b(South)
+///   . . A A A . b(South)
+///   . . A A A . b(South)
+///   S i A A A i K
+///   . . A A A . .
 /// ```
 ///
 /// The scaffold — what stays observed — is only the three sources and the sink.
@@ -424,31 +460,40 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
 /// out; the ceiling is the input inserter's 0.86 items/s per line, exactly as it
 /// would be in Factorio.
 fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
-    // Width: source, inserter, assembler, inserter, sink/belt column.
-    if size < 5 || size < BANK_LINES {
+    // Lines stack back to back: three rows each, and no gap between them, so a
+    // bank of three is nine rows tall. The columns are a line's own, plus one
+    // for the belt that merges every line into the shared sink.
+    let height = LINE_H * BANK_LINES;
+    let width = LINE_W;
+    if size < width || size < height {
         return None;
     }
-    let y0 = rng.gen_range(0..=(size - BANK_LINES));
-    let x0 = rng.gen_range(0..=(size - 5));
+    let y0 = rng.gen_range(0..=(size - height));
+    let x0 = rng.gen_range(0..=(size - width));
     let recipe = *Item::craftable().choose(rng).unwrap();
     let input_item = recipe
         .ingredient()
         .expect("every craftable recipe has an ingredient");
 
+    // Line `j` is anchored at `machine(j)` and runs along `row(j)`, its middle.
+    let machine = |j: usize| (x0 + 2, y0 + LINE_H * j);
+    let row = |j: usize| y0 + LINE_H * j + 1;
+    let column = x0 + width - 1;
+    let sink = (column, row(BANK_LINES - 1));
+
     let mut grid = Grid::new(size, size);
-    let sink = (x0 + 4, y0 + BANK_LINES - 1);
     let mut protected = Vec::new();
     for j in 0..BANK_LINES {
         grid.set(
             x0,
-            y0 + j,
+            row(j),
             Cell {
                 entity: Entity::Source,
                 item: input_item,
                 ..Default::default()
             },
         );
-        protected.push(grid.idx(x0, y0 + j));
+        protected.push(grid.idx(x0, row(j)));
     }
     grid.set(
         sink.0,
@@ -461,45 +506,42 @@ fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     );
     protected.push(grid.idx(sink.0, sink.1));
 
+    // `removable` is the region the answer may write to, not the region this
+    // answer happened to fill. The distinction is the whole family: `blank`
+    // observes every cell it does not blank, so listing only the built cells
+    // would leave an unbuilt line *given* as empty — the conditioning would
+    // spell out the line count and the ambiguity would evaporate. Masking the
+    // whole bank instead asks the model the question we mean to ask: how many
+    // lines belong here?
+    let mut removable = Vec::new();
+    for y in y0..y0 + height {
+        for x in x0..x0 + width {
+            let i = grid.idx(x, y);
+            if !protected.contains(&i) {
+                removable.push(i);
+            }
+        }
+    }
+
     // The choice that makes this family ambiguous. Lines are built upward from
     // the sink's own row so the belt column is always unbroken; leaving the
     // count to the answer rather than to the scaffold is the entire point.
     let lines = rng.gen_range(1..=BANK_LINES);
-    let mut removable = Vec::new();
-    for j in 0..BANK_LINES {
-        let y = y0 + j;
-        // `removable` is the region the answer may write to, not the region this
-        // answer happened to fill. The distinction is the whole family: `blank`
-        // observes every cell it does not blank, so listing only the built cells
-        // would leave an unbuilt line *given* as empty — the conditioning would
-        // spell out the line count and the ambiguity would evaporate. Masking
-        // the region instead asks the model the question we mean to ask: how
-        // many lines belong here?
-        removable.extend([
-            grid.idx(x0 + 1, y),
-            grid.idx(x0 + 2, y),
-            grid.idx(x0 + 3, y),
-        ]);
-        // Every line above the sink's own row hands off to a belt running down
-        // the column into the shared sink.
-        if y != sink.1 {
-            removable.push(grid.idx(x0 + 4, y));
-        }
-        if j < BANK_LINES - lines {
-            continue;
-        }
+    let first = BANK_LINES - lines;
+    for j in first..BANK_LINES {
         grid.set(
             x0 + 1,
-            y,
+            row(j),
             Cell {
                 entity: Entity::Inserter,
                 direction: Direction::East,
                 ..Default::default()
             },
         );
+        let (mx, my) = machine(j);
         grid.set(
-            x0 + 2,
-            y,
+            mx,
+            my,
             Cell {
                 entity: Entity::Assembler,
                 direction: Direction::East,
@@ -508,17 +550,20 @@ fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
             },
         );
         grid.set(
-            x0 + 3,
-            y,
+            x0 + 5,
+            row(j),
             Cell {
                 entity: Entity::Inserter,
                 direction: Direction::East,
                 ..Default::default()
             },
         );
-        if y != sink.1 {
-            grid.set(x0 + 4, y, Cell::belt(Direction::South));
-        }
+    }
+    // One belt column carries every line's output down into the shared sink. It
+    // starts at the topmost line that was actually built: the bottom line hands
+    // off to the sink directly and needs no belt at all.
+    for y in row(first)..sink.1 {
+        grid.set(column, y, Cell::belt(Direction::South));
     }
 
     if !item_reaches_sink(&grid) {
