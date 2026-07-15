@@ -226,7 +226,10 @@ see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
 1. **From-scratch evaluation** ✅ *(this branch)* — mask everything but the
    source/sink so the model designs instead of inpainting. Establishes the real
    baseline. Expect `exact` to collapse and `functional` to become the number
-   that matters; the reference scores ~0.11 on the equivalent metric.
+   that matters. We took the *discipline* from the reference's `thput_eot`, not a
+   number to beat: their ~0.11 is a **graded throughput** score and `functional`
+   is **binary**, so the two are not comparable. `SCRATCH ratio` is the
+   comparable one (and even then the world models differ).
 2. **Graded throughput** ✅ *(this branch)* — `src/throughput.rs`, power mean at
    `p=0.5`. What makes one working factory rankable against another; everything
    below was blocked on it. Dropped the "lane-aware" qualifier: lanes are vacuous
