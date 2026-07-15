@@ -11,9 +11,15 @@ now, what the known bottlenecks are (ranked), and the concrete next steps.
   rules, obstacles as separate conditioning. ✅ unit-tested.
 - **Simulator** (`src/sim.rs`) — `item_reaches_sink` functional check for belts,
   undergrounds, inserters, assemblers. ✅ unit-tested.
-- **Lesson generator** (`src/factory_gen.rs`) — 4 lesson kinds, built by
+- **Lesson generator** (`src/factory_gen.rs`) — 5 lesson kinds, built by
   construction and verified functional; blanking into (partial, solution) pairs.
+  One of them (`ASSEMBLER_BANK`) admits **many** valid answers per task.
   ✅ unit-tested.
+- **Graded throughput** (`src/throughput.rs`) — items/second per sink, folded by
+  a power mean at `p=0.5`. Ranks two *working* factories against each other.
+  ✅ unit-tested.
+- **Best-of-N** (`src/best_of_n.rs`) — draw N candidates, keep the one the
+  simulator scores highest. No retraining. ✅ unit-tested.
 - **Masked diffusion core** (`src/diffusion.rs`) — forward masking + joint,
   structure-weighted CE loss, MDLM ELBO option. ✅ unit-tested.
 - **Denoiser** (`src/model.rs`) — per-channel embeddings, conv tower with
@@ -52,9 +58,23 @@ Each is reported in **two modes**, and the difference is the point:
 - **`SCRATCH`** — only the source and sink are visible (~119 of 121 masked), so
   the model must decide *what to build and where*. **Read `functional` here, not
   `exact`**: many layouts deliver the item, so `exact` only rewards
-  rediscovering the generator's own BFS answer. This is the first metric in the
-  project where the two genuinely come apart — under inpainting the data forces
-  them to agree.
+  rediscovering the generator's own BFS answer.
+
+Two ways the metrics come apart, and they are different things. `SCRATCH` makes
+`exact` *hard* — the model must rediscover one specific layout out of many that
+work. `ASSEMBLER_BANK` makes `exact` **wrong**: the task has three valid answers,
+so `exact` is capped below 1.0 by construction and a model that always builds
+the best answer scores *worse* on it than one that guesses the generator's roll.
+On ambiguous families `exact` is a diagnostic, not a target.
+
+Since throughput landed, validation also reports:
+
+- **`thput`** — mean items/second delivered by the reconstruction.
+- **`ratio`** — delivered throughput ÷ the taught answer's throughput. `1.0`
+  means "as good as what it was shown". This can exceed 1.0.
+- **`beat`** — how many reconstructions *out-delivered* the answer they were
+  taught. Unreachable before an ambiguous family existed; on `ASSEMBLER_BANK` a
+  model shown a 1-line bank that builds 3 lines scores `ratio = 3.0`.
 
 ## Bottlenecks, ranked
 
@@ -68,9 +88,11 @@ and `cargo run --release --example task_space`. The 5,000-step GPU run reached
   each. `underground_cross`: 110 templates, ~364× each. That is memorization
   scale. (`move_one_item` and `..._chaos` are the honest half — ~42k and 200k+
   distinct tasks, each seen ~once, so 1.000 there is real generalization.)
-- **`ambiguous tasks: 0` everywhere.** Each conditioning has exactly one valid
-  answer, so `functional == exact` is a property of the *data*, and a 30-line BFS
-  beats the model at the task as posed.
+- **`ambiguous tasks: 0` everywhere** *(at the time of that run)*. Each
+  conditioning had exactly one valid answer, so `functional == exact` is a
+  property of the *data* — the two metrics moved together for 5,000 steps
+  because getting it right and getting it working were the same event — and a
+  30-line BFS beats the model at the task as posed.
 - **`exact=1.000` came from n=64.** For an all-successes run the 95% lower bound
   is `0.05^(1/n)`: 64/64 proves only >95.4%, and per-lesson 16/16 only >82.9%.
   The fresh (held-out) training batches put the real entity error at **0.19%**
@@ -79,9 +101,28 @@ and `cargo run --release --example task_space`. The 5,000-step GPU run reached
 
 **Mitigations in place:** from-scratch validation (`Sample::blank_to_scaffold`)
 masks everything but the source/sink, so the model must *design*, not inpaint;
-`val_batch` default 64 → 512; `functional` is now item-aware.
-**Next:** a curriculum where tasks admit *many* valid answers, which is the
-precondition for the model to beat BFS at all.
+`val_batch` default 64 → 512; `functional` is now item-aware; and
+**`ASSEMBLER_BANK` breaks the ambiguity floor** — 189 tasks at size 11, *all
+189* admitting 3 valid answers that deliver 1×/2×/3×:
+
+```
+ASSEMBLER_BANK   distinct factories: 567 | distinct tasks: 189 | ambiguous tasks: 189
+```
+
+Re-derive with `cargo run --release --example task_space`; see one task and its
+three answers with `cargo run --release --example ambiguity_demo`.
+
+A caution learned the hard way here: `Sample::blank` observes every cell it does
+not blank, so `removable` must list the region an answer *may* build, not the
+cells a given answer *did* build. Listing only the built cells leaves an unbuilt
+line observed-as-empty, which silently states the answer in the conditioning and
+returns ambiguity to 0. Any new ambiguous family must be checked under `blank`,
+not only under `blank_to_scaffold`.
+**Next:** the remaining four families are still rigid. `move_one_item` is the
+valuable one to fix (~42k tasks, honest scale) — its BFS picks one shortest path
+where many exist, so the model is trained to imitate a tie-break. Randomizing it
+should be measured, not assumed: same-conditioning collisions are rare at that
+scale, so it may not move `ambiguous` much while risking mode-averaging.
 
 ### 1. Empty-cell dominance (the big one)
 ~95% of cells are `Empty`. An unweighted loss collapses to predicting empty
@@ -106,24 +147,42 @@ much healthier failure than collapse and is a tuning target, not a wall.
 focal loss; try masking the *removable* cells preferentially during training so
 the belts are always the learning target.
 
-### 2. Simulator fidelity — the metric cannot rank two working factories
-`item_reaches_sink` is a *binary* reachability check, not lane-aware throughput:
-it does not model belt capacity, sideloading, or splitter balancing, so it cannot
-say which of two working layouts is better.
+### 2. Simulator fidelity — ✅ the metric can now rank two working factories
+`item_reaches_sink` was a *binary* reachability check: it could not say which of
+two working layouts was better, so Best-of-N had nothing to sort by and RL had
+no gradient to climb. This was the blocker for almost everything downstream.
 
-This is the blocker for almost everything downstream. Best-of-N has nothing to
-sort by; RL has no gradient to climb (the binary reward is already saturated at
-1.0). **Graded throughput is the unlock, and it should come before RL.**
+**Fixed.** `src/throughput.rs` scores a factory in items/second per sink, folded
+by `((1/N)·Σ achievedᵢ^p)^(1/p)` at `p=0.5` so starving any one sink is punished
+harder than slowing all of them. Flow propagates by Kahn's algorithm over a
+graph whose edge `p → q` exists only if `p` pushes into `q` *and* `q` accepts
+from `p`. Three deliberate departures from the reference, each a test in that
+file:
 
-Fixed since the last run: `item_reaches_sink` was also **item-blind**, scoring
-"belt raw plate straight into a gear sink" as functional — i.e. rewarding
-*skipping* the assembler. It now carries the item through the BFS and applies
-recipes (the reference guards the same hole at `throughput.rs:205-226`).
-**Next:** port the reference's lane-aware flow graph (`graph.rs` +
-`throughput.rs`), scoring `((1/N)·Σ achievedᵢ^p)^(1/p)` at `p=0.5` so starving
-any one sink is punished. Note their assembler model is **wrong** — it never
-reads `crafting_time`/`crafting_speed` (`entities.rs:426-451`) — so port the
-structure, not that part.
+- **The assembler is a real machine.** The reference never reads `crafting_time`
+  or `crafting_speed` — it models a machine as a pass-through *ratio* capped at
+  1.0, which reinterprets a per-craft count as a per-second rate. Right for 0.5 s
+  recipes, 12–20× too generous for long ones, and it means a machine can never
+  be the bottleneck — which is exactly what a machine usually *is*. We cap at
+  `Recipe::crafts_per_second`.
+- **Cycles degrade locally.** The reference scores the whole factory 0 if a cycle
+  exists anywhere, even in a disconnected corner — a cliff, as a training signal.
+  Here a cycle simply never gets a topological turn, so it starves what is
+  downstream of it while sinks fed by other paths still score. Kahn's algorithm
+  gives this for free; no cycle check needed.
+- **No lanes — and the roadmap used to ask for them anyway.** The reference
+  splits each belt tile into left/right lane nodes to model sideloading. That is
+  vacuous *here*: our entities are 1×1, an inserter has exactly one pickup tile,
+  and belt merging is already handled by the per-tile cap. Porting lanes would
+  have added nodes that can never differ. The real limitation is the **world
+  model** (1×1 entities, no lanes, no sideloading), not the throughput port —
+  so "lane-aware throughput" was the wrong next step and is not one now. If we
+  want lanes, they belong in `world.rs` first, and bottleneck 4 is where that
+  lives.
+
+Also fixed earlier: `item_reaches_sink` was **item-blind**, scoring "belt raw
+plate straight into a gear sink" as functional — i.e. rewarding *skipping* the
+assembler. It now carries the item through the BFS and applies recipes.
 
 ### 3. Receptive field / global routing
 Addressed architecturally via the global-context vector, but for large grids a
@@ -165,18 +224,26 @@ see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
    source/sink so the model designs instead of inpainting. Establishes the real
    baseline. Expect `exact` to collapse and `functional` to become the number
    that matters; the reference scores ~0.11 on the equivalent metric.
-2. **Lane-aware graded throughput** — port `graph.rs`/`throughput.rs` (power mean
-   at `p=0.5`). Everything below is blocked on this: it is what makes one working
-   factory rankable against another.
-3. **Best-of-N sampling, verified by the simulator** — the highest-leverage step
-   for *usable output*. Sample N layouts, simulate each, keep the best. The
-   sampler is already stochastic and conditional, so this needs **no retraining**
-   and converts "right 99.8% of the time" into "the exported blueprint works".
-   Pipeline: generate → verify → best-of-N → export.
-4. **Richer curriculum that admits many answers** — multi-source/multi-sink,
-   several recipes, tighter obstacle budgets, true 3×3 assemblers and 2×1
-   splitters. Until a task has more than one valid solution, the model cannot
-   demonstrate design and BFS remains the better tool.
+2. **Graded throughput** ✅ *(this branch)* — `src/throughput.rs`, power mean at
+   `p=0.5`. What makes one working factory rankable against another; everything
+   below was blocked on it. Dropped the "lane-aware" qualifier: lanes are vacuous
+   in a 1×1 world model (see bottleneck 2).
+3. **Best-of-N sampling, verified by the simulator** ✅ *(this branch)* —
+   `src/best_of_n.rs` and `sample --best-of N --temperature T`. Draw N layouts,
+   simulate each, keep the best; needs **no retraining** because the sampler is
+   already stochastic. `--blueprint-out` exports the winner, so the pipeline is
+   generate → verify → best-of-N → export. `BestOfN::distinct` is the honest
+   probe: if it stays at 1, the model holds one memorised answer and no larger
+   `N` will help.
+4. **A curriculum that admits many answers** ✅ *(this branch)* —
+   `ASSEMBLER_BANK`: 3 sources and a shared sink are the task, and how many of
+   the 3 assembler lines to build is the answer. All 189 tasks admit all 3
+   answers, delivering 1×/2×/3×. This is what gives steps 2 and 3 something to
+   do and what makes `beat_original` reachable at all.
+   **Still open:** the other four families remain rigid, and the bank is a small,
+   memorizable family (189 tasks seen ~169× each). The next ambiguous family
+   should be at `move_one_item` scale — multi-source/multi-sink, several recipes,
+   tighter obstacle budgets, true 3×3 assemblers and 2×1 splitters.
 5. **Tune the imbalance knobs** — sweep `structure_weight`, add focal loss,
    compare mean-CE vs `--elbo`.
 6. **Cheap architecture wins from the reference** — 1×1-conv tile head → softmax
@@ -184,11 +251,32 @@ see [`docs/TRAINING_ANALYSIS.md`](TRAINING_ANALYSIS.md) for the evidence.
    +76.4% SPS); per-tile conditioned attribute heads `P(tile)·P(attrs|tile)`.
 7. **Factorio parity** — RCON harness (1800 warmup / 3600 measure ticks at 32×)
    to prove the simulator is not lying. Not CI-able; needs a licensed install.
-8. **RL/self-improvement (optional, last)** — only once throughput is graded and
-   parity-checked. Today the reward is binary and already saturated, so **there
-   is nothing for a policy gradient to climb**. Note the reference *tried*
-   potential-based shaping and rejected it (−2.8% thput at p=0.560, −18.3% SPS);
-   reward stays terminal-only.
+8. **RL/self-improvement (still last, and still not yet)** — the three
+   preconditions it was waiting on are now met: throughput is graded (2), the
+   sampler can be ranked (3), and at least one family admits many answers (4).
+   That is *necessary* but not sufficient, and RL should still not be next:
+
+   - **Best-of-N has not been spent yet.** It buys the same thing RL buys —
+     higher delivered throughput — for zero training cost and zero risk of
+     collapse. Measure its gain first; it is also the honest read on whether the
+     model has a distribution to improve (`BestOfN::distinct`). If N draws all
+     land on the same grid, a policy gradient has nothing to sharpen either.
+   - **One ambiguous family out of five is a thin base.** RL would optimise
+     throughput on `ASSEMBLER_BANK` — 189 memorizable tasks — and could simply
+     memorise "always build 3 lines" without learning anything about design.
+     Widen the ambiguous curriculum first (step 4's open half).
+   - **The simulator has not been parity-checked** (step 7). RL optimises the
+     reward it is given, exactly and remorselessly. Handing it an unverified
+     simulator means it will find that simulator's bugs rather than good
+     factories — the standard failure mode, and much harder to notice than a
+     crash.
+
+   When it does happen: reward stays **terminal-only**. The reference *tried*
+   potential-based shaping and rejected it (−2.8% thput at p=0.560, −18.3% SPS).
+   The natural first form is not PPO but the cheapest thing that works —
+   rejection sampling / expert iteration: run Best-of-N, keep the winners, fine-
+   tune on them, repeat. It reuses the machinery in (2) and (3) exactly as-is,
+   has no new hyperparameters, and cannot collapse the way a policy gradient can.
 
 ## How to reproduce
 
@@ -205,7 +293,15 @@ cargo run --release --features wgpu --bin train -- --steps 50000 --out checkpoin
 # Validate: blank known factories and reconstruct
 cargo run --release --bin sample -- --ckpt checkpoints/denoiser --show 4 --eval 256
 
-# Inspect heatmaps and import the first reconstruction in Factorio
+# Best-of-N: draw 16 candidates per task, keep whichever the simulator ranks
+# highest, and export that one. Needs --temperature: greedy decoding draws the
+# same factory every time and the extra passes would buy nothing.
 cargo run --release --bin sample -- --ckpt checkpoints/denoiser \
-  --blueprint-out generated-blueprint.txt
+  --best-of 16 --temperature 1.0 --blueprint-out generated-blueprint.txt
+
+# Measure the curriculum itself (no model): how many tasks, how many answers each
+cargo run --release --example task_space
+
+# See one task and every valid answer to it, with the rate each delivers
+cargo run --release --example ambiguity_demo
 ```
