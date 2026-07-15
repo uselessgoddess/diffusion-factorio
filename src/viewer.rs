@@ -21,10 +21,12 @@
 //! so hovering tells you what the model actually committed there.
 //!
 //! This is deliberately *not* a Factorio-accurate render. It is a schematic:
-//! flat colours, an arrow for facing, a short item tag. The authoritative view
-//! of a factory is the blueprint string from [`crate::blueprint`] pasted into
-//! the real game — see `docs/VIEWER.md` for why that is the primary path and
-//! this is the triage tool that sits in front of it.
+//! flat colours, an arrow for facing, a short item tag. When you need to see the
+//! factory as the game sees it, the blueprint string from [`crate::blueprint`]
+//! pastes into the real thing — but that is a different job (it costs a licence,
+//! an install and a human alt-tabbing per sample), not a better version of this
+//! one. `docs/VIEWER.md` argues that split out, and why the reference's own
+//! viewer contains no blueprint code at all.
 
 use crate::world::{Direction, Entity, Grid, Item, Misc};
 use std::fmt::Write as _;

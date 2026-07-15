@@ -3,7 +3,7 @@ use diffusion_factorio::observability::{
     write_metrics_jsonl, write_sample_report, write_training_report, RunMetadata, SampleReportEntry,
 };
 use diffusion_factorio::train::TrainLog;
-use diffusion_factorio::world::{Cell, Direction, Grid};
+use diffusion_factorio::world::{Cell, Direction, Entity, Grid, Item};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -220,5 +220,46 @@ fn spatial_report_contains_confidence_entropy_and_error_heatmaps() {
     assert!(html.contains("Error"));
     assert!(html.contains("Reveal round"));
     assert!(html.contains("routing &lt;sample&gt;"));
+    fs::remove_file(path).ok();
+}
+
+/// Issue #9 asks to *see* whether the model infers well. Glyph panels answer
+/// that in `A`/`a`/`>`; this asserts the report also draws the factory itself,
+/// with the model's answer beside the truth so they can be compared by eye.
+#[test]
+fn spatial_report_draws_the_factory_beside_the_ground_truth() {
+    let path = temp_file("sample-report-svg.html");
+    let mut target = Grid::new(5, 5);
+    target.set(
+        1,
+        1,
+        Cell {
+            entity: Entity::Assembler,
+            item: Item::IronGear,
+            ..Default::default()
+        },
+    );
+    let input = Grid::new(5, 5);
+    let prediction = target.clone();
+    let entry = SampleReportEntry {
+        label: "gear cell",
+        input: &input,
+        prediction: &prediction,
+        target: &target,
+        observed: &[false; 25],
+        confidence: &[0.5; 25],
+        entropy: &[0.5; 25],
+        reveal_step: &[1; 25],
+    };
+
+    write_sample_report(&path, &[entry]).unwrap();
+    let html = fs::read_to_string(&path).unwrap();
+    assert!(html.contains("Model&#x27;s factory") || html.contains("Model's factory"));
+    // Two grids hold the assembler, so it is drawn twice — at 3x3 both times.
+    assert_eq!(
+        html.matches("width=\"64\" height=\"64\"").count(),
+        2,
+        "prediction and truth must both show a 3x3 assembler:\n{html}"
+    );
     fs::remove_file(path).ok();
 }

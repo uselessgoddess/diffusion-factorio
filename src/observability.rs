@@ -133,8 +133,12 @@ pub fn write_sample_report(path: &Path, entries: &[SampleReportEntry<'_>]) -> Re
             .map(|&step| step as f32 / max_step)
             .collect();
         cards.push_str(&format!(
-            "<section class=\"sample\"><h2>{}</h2><div class=\"panels\">{}{}{}{}{}{}{}</div></section>",
+            "<section class=\"sample\"><h2>{}</h2><div class=\"panels\">{}{}{}</div>\
+             <div class=\"panels\">{}{}{}{}{}{}{}</div></section>",
             escape_html(entry.label),
+            svg_panel("Given", entry.input),
+            svg_panel("Model's factory", entry.prediction),
+            svg_panel("Ground truth", entry.target),
             grid_panel("Masked input", entry.input),
             grid_panel("Prediction", entry.prediction),
             grid_panel("Ground truth", entry.target),
@@ -208,6 +212,16 @@ fn ensure_parent(path: &Path) -> Result<()> {
             .with_context(|| format!("create output directory {}", parent.display()))?;
     }
     Ok(())
+}
+
+/// The picture of a factory, as opposed to [`grid_panel`]'s picture of the
+/// tensor. Machines appear at the size Factorio gives them, so a reader can see
+/// a 3×3 assembler with inserters on its edge rather than decode `A` and `a`.
+fn svg_panel(title: &str, grid: &Grid) -> String {
+    format!(
+        "<div><h3>{title}</h3>{}</div>",
+        crate::viewer::grid_to_svg(grid)
+    )
 }
 
 fn grid_panel(title: &str, grid: &Grid) -> String {
@@ -289,5 +303,5 @@ const frac=(v,k)=>v.n?v[k]/v.n:0;chart('beat',[{color:'#5ee6a8',values:vr.map(r=
 </script></main></body></html>"#;
 
 const SAMPLE_REPORT_TEMPLATE: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>diffusion-factorio reconstruction diagnostics</title><style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101418;color:#e8edf2;font:14px/1.4 system-ui,sans-serif}main{max-width:1500px;margin:auto;padding:28px}h1{margin:0}.intro{color:#9eabb6;margin:5px 0 22px}.sample{background:#182027;border:1px solid #293740;border-radius:10px;padding:16px;margin:14px 0}.sample h2{margin:0 0 12px}.panels{display:flex;gap:18px;flex-wrap:wrap}.panels h3{font-size:12px;color:#aeb9c2;margin:0 0 6px}.grid{display:grid;grid-template-columns:repeat(var(--w),18px);grid-auto-rows:18px;gap:1px;background:#0b0e11;padding:4px;border-radius:4px}.grid i{display:block;min-width:18px;min-height:18px}.glyphs i{font:14px/18px ui-monospace,monospace;text-align:center;background:#26313a;font-style:normal}
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101418;color:#e8edf2;font:14px/1.4 system-ui,sans-serif}main{max-width:1500px;margin:auto;padding:28px}h1{margin:0}.intro{color:#9eabb6;margin:5px 0 22px}.sample{background:#182027;border:1px solid #293740;border-radius:10px;padding:16px;margin:14px 0}.sample h2{margin:0 0 12px}.panels{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;margin-bottom:16px}.panels:last-child{margin-bottom:0}.panels h3{font-size:12px;color:#aeb9c2;margin:0 0 6px}.factory{display:block;width:330px;max-width:100%;height:auto;border-radius:5px}.grid{display:grid;grid-template-columns:repeat(var(--w),18px);grid-auto-rows:18px;gap:1px;background:#0b0e11;padding:4px;border-radius:4px}.grid i{display:block;min-width:18px;min-height:18px}.glyphs i{font:14px/18px ui-monospace,monospace;text-align:center;background:#26313a;font-style:normal}
 </style></head><body><main><h1>Reconstruction diagnostics</h1><div class="intro">Confidence and normalized entropy are captured when each cell is revealed. Error excludes observed conditioning cells.</div>__SAMPLE_CARDS__</main></body></html>"#;

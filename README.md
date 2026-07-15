@@ -101,7 +101,16 @@ cargo run --release --bin sample -- --ckpt checkpoints/denoiser \
   --blueprint-out generated-blueprint.txt
 ```
 
-Open `sample-report.html` to inspect spatial uncertainty. To inspect the result
+Open `sample-report.html` to see the model's factory drawn beside the ground
+truth, over the spatial uncertainty heatmaps. To look at the training data the
+same way — every lesson family, drawn at Factorio's footprints, each with a
+paste-ready blueprint string:
+
+```bash
+cargo run --release --example gallery   # writes gallery.html
+```
+
+To inspect the result
 in Factorio, copy `generated-blueprint.txt`, open the Blueprint Library (`B`),
 click **Import string**, and paste it. Abstract source/sink anchors appear as
 tagged constant combinators. See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)
@@ -125,6 +134,7 @@ for the mapping and current simulation-parity limits.
 | `blueprint.rs` | Grid → Factorio 2.x JSON and compressed blueprint string |
 | `persist.rs` | Checkpoint save/load (`CompactRecorder` + JSON config) |
 | `textual.rs` | ASCII rendering so every output is eyeballable |
+| `viewer.rs` | SVG rendering at Factorio's real footprints — the human's view |
 | `bin/` | `gen_data`, `train`, `sample` CLIs |
 
 ## Backends
@@ -143,4 +153,6 @@ for the mapping and current simulation-parity limits.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the masked-diffusion design in detail.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — bottlenecks (ranked) and next steps.
 - [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) — how to read curves and heatmaps.
+- [`docs/VIEWER.md`](docs/VIEWER.md) — seeing the factory: viewer vs blueprint vs
+  mod vs RCON, what the reference does, and when each is worth building.
 - [`docs/FACTORIO_EXPORT.md`](docs/FACTORIO_EXPORT.md) — in-game import and entity mapping.

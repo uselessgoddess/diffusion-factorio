@@ -47,3 +47,7 @@ path = "experiments/ambiguity_demo.rs"
 [[example]]
 name = "overlap_check"
 path = "experiments/overlap_check.rs"
+
+[[example]]
+name = "gallery"
+path = "experiments/gallery.rs"
