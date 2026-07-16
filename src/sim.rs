@@ -19,10 +19,36 @@ use std::collections::VecDeque;
 /// `UNDERGROUND_REACH` in the reference.
 pub const UNDERGROUND_REACH: i32 = 5;
 
+/// Every inserter standing beside `(x, y)` whose hand reaches **into** it.
+///
+/// An inserter's pickup is the tile behind it (`q - d`), the same rule
+/// `throughput::accepts_from` applies from the other side. Facing matters: an
+/// inserter *pointing at* the belt is dropping onto it, not taking off it, and
+/// is not a tap.
+fn tapping_inserters(grid: &Grid, x: usize, y: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+        let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+        if !grid.in_bounds(nx, ny) {
+            continue;
+        }
+        let (nx, ny) = (nx as usize, ny as usize);
+        let neighbour = grid.get(nx, ny);
+        if neighbour.entity != Entity::Inserter {
+            continue;
+        }
+        let (idx, idy) = neighbour.direction.delta();
+        if (nx as i32 - idx, ny as i32 - idy) == (x as i32, y as i32) && !out.contains(&(nx, ny)) {
+            out.push((nx, ny));
+        }
+    }
+    out
+}
+
 /// Every entity this one pushes flow *into*, named by its anchor. A belt at `p`
-/// facing `d` pushes flow to `p + d`; underground entrances jump to the nearest
-/// matching exit within reach; a source or an assembler offers to everything
-/// around its footprint.
+/// facing `d` pushes flow to `p + d` **and** to any inserter reaching in to take
+/// off it; underground entrances jump to the nearest matching exit within reach;
+/// a source or an assembler offers to everything around its footprint.
 ///
 /// `(x, y)` must be an anchor — the results are anchors too, so callers compose
 /// without ever handling a body tile. See [`Grid::anchor_at`].
@@ -30,6 +56,19 @@ pub const UNDERGROUND_REACH: i32 = 5;
 /// This says only who *offers* to whom. Whether the receiver takes it is the
 /// receiver's business — see `throughput::accepts_from`. [`item_reaches_sink`]
 /// is deliberately laxer and accepts from any pusher.
+///
+/// **The sideways offer is the bus tap**, and it used to be missing. A belt
+/// offered flow only to the one tile it faced, so an inserter standing beside a
+/// passing line was never offered anything and the oldest layout in Factorio —
+/// one belt, a row of inserters pulling off it into a row of machines — routed
+/// nothing at all (`experiments/bus_tap`: score 0.000, does not even reach a
+/// sink). The pattern was unrepresentable, so no lesson could teach it and
+/// Best-of-N would have thrown it away on sight.
+///
+/// Scope, deliberately: a plain [`Entity::TransportBelt`] is tappable and an
+/// underground belt or a splitter is not. In the game all three are, but the
+/// issue's "одна линия" is a belt, and the other two would each need their own
+/// evidence rather than an assumption (`docs/ROADMAP.md`).
 pub(crate) fn flow_targets(grid: &Grid, x: usize, y: usize) -> Vec<(usize, usize)> {
     let cell = grid.get(x, y);
     let mut out = Vec::new();
@@ -39,6 +78,15 @@ pub(crate) fn flow_targets(grid: &Grid, x: usize, y: usize) -> Vec<(usize, usize
             let (nx, ny) = (x as i32 + dx, y as i32 + dy);
             if grid.in_bounds(nx, ny) {
                 out.push((nx as usize, ny as usize));
+            }
+            // An inserter takes off the tile behind it; it does not offer to
+            // whatever is beside it.
+            if cell.entity == Entity::TransportBelt {
+                for tap in tapping_inserters(grid, x, y) {
+                    if !out.contains(&tap) {
+                        out.push(tap);
+                    }
+                }
             }
         }
         Entity::Splitter => {

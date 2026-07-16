@@ -134,13 +134,11 @@ pub fn throughput(grid: &Grid) -> ThroughputReport {
         .map(|i| predecessors[i].iter().filter(|&&p| reachable[p]).count())
         .collect();
 
+    let mut inflow: Vec<Flow> = vec![NO_FLOW; n];
     let mut outputs: Vec<Flow> = vec![NO_FLOW; n];
     let mut done = vec![false; n];
     let mut queue: VecDeque<usize> = VecDeque::new();
     for &s in &sources {
-        // A source is an unlimited supply of its item. This seeding is the only
-        // place flow enters the factory.
-        outputs[s][grid.cells[s].item as usize] = f64::INFINITY;
         queue.push_back(s);
     }
 
@@ -152,29 +150,23 @@ pub fn throughput(grid: &Grid) -> ThroughputReport {
         }
         done[u] = true;
 
-        // Sources ignore their input and keep the seeded infinity.
-        if grid.cells[u].entity != Entity::Source {
-            let mut input = NO_FLOW;
-            for &p in &predecessors[u] {
-                for (acc, rate) in input.iter_mut().zip(outputs[p].iter()) {
-                    *acc += rate;
-                }
-            }
-            outputs[u] = transform(grid, u, &input);
+        outputs[u] = if grid.cells[u].entity == Entity::Source {
+            // A source is an unlimited supply of its item. This seeding is the
+            // only place flow enters the factory, and a source ignores its input.
+            let mut seeded = NO_FLOW;
+            seeded[grid.cells[u].item as usize] = f64::INFINITY;
+            seeded
+        } else {
+            transform(grid, u, &inflow[u])
+        };
 
-            // Fan-out is an even split: what leaves this tile is shared between
-            // everything it feeds. This is the only splitting mechanism, and it
-            // has no backpressure — a machine feeding one live inserter and one
-            // dead-ended inserter still sends half its output to the dead end.
-            let k = successors[u].len();
-            if k > 1 {
-                for rate in outputs[u].iter_mut() {
-                    *rate /= k as f64;
-                }
+        for (&v, share) in successors[u]
+            .iter()
+            .zip(share_out(grid, &successors[u], &outputs[u]))
+        {
+            for (acc, rate) in inflow[v].iter_mut().zip(share.iter()) {
+                *acc += rate;
             }
-        }
-
-        for &v in &successors[u] {
             in_degree[v] = in_degree[v].saturating_sub(1);
             if in_degree[v] == 0 {
                 queue.push_back(v);
@@ -262,6 +254,104 @@ fn accepts_from(grid: &Grid, (qx, qy): (usize, usize), (px, py): (usize, usize))
     }
 }
 
+/// Items/second the tile at `idx` can take in, whatever they are.
+///
+/// One table, read from both sides: [`transform`] caps what leaves a tile by it,
+/// and [`share_out`] caps what any one edge may hand it. Two tables would drift,
+/// and a fan-out that believed an inserter could swallow a whole belt would put
+/// the difference in the void.
+///
+/// `INFINITY` means "not the constraint here" rather than "unlimited": a sink
+/// swallows whatever arrives by definition, and an assembler's intake is capped
+/// by the inserter loading it and by its own recipe, both of which are already
+/// modelled where they belong.
+fn intake_cap(grid: &Grid, idx: usize) -> f64 {
+    let cell = grid.cells[idx];
+    match cell.entity {
+        Entity::TransportBelt | Entity::UndergroundBelt => BELT_RATE,
+        // A splitter is two belt tiles wide and carries two belts, which is the
+        // whole point of it: one belt in leaves each output half full, two belts
+        // in leave each output full. Capped at a single `BELT_RATE` it throttled
+        // to half of what a plain pair of belts would have carried, and the model
+        // was right to avoid it.
+        Entity::Splitter => {
+            let (w, h) = cell.entity.footprint(cell.direction);
+            BELT_RATE * (w * h) as f64
+        }
+        Entity::Inserter => INSERTER_RATE,
+        Entity::Assembler | Entity::Sink | Entity::Source | Entity::Empty => f64::INFINITY,
+    }
+}
+
+/// How a tile's output is divided between everything it feeds.
+///
+/// Each successor takes up to [`intake_cap`], and whatever it cannot take is
+/// re-offered to the rest — "water-filling". Two claims live here:
+///
+/// * **An even split is the special case, not the rule.** When no cap binds,
+///   every successor gets the same share, which is what a splitter does and what
+///   a machine with inserters on two sides does. The even split this replaces was
+///   right about those and only those.
+/// * **A tap takes its share and the line carries on.** A belt at 15/s feeding a
+///   downstream belt and one inserter does *not* give them 7.5 each: the inserter
+///   takes the 0.86 it can hold and 14.14 continues down the line, so a second
+///   tap further along still has something to take. That is what makes a row of
+///   inserters pulling off one belt worth building, and an even split would have
+///   priced it as a way to throw a belt away.
+///
+/// Still no backpressure: a machine feeding one live inserter and one dead-ended
+/// inserter sends the dead end its full share and nothing flows back. Caps bound
+/// what a successor can take, not what it has any use for.
+fn share_out(grid: &Grid, successors: &[usize], out: &Flow) -> Vec<Flow> {
+    let total: f64 = out.iter().sum();
+    if successors.is_empty() || total <= 0.0 {
+        return vec![NO_FLOW; successors.len()];
+    }
+    let caps: Vec<f64> = successors.iter().map(|&v| intake_cap(grid, v)).collect();
+    // `clamp_total` turns the scalar allowance back into a flow, keeping the item
+    // mix and handling a source's infinite supply the same way it does anywhere
+    // else.
+    water_fill(total, &caps)
+        .iter()
+        .map(|&allowance| clamp_total(out, allowance))
+        .collect()
+}
+
+/// Divide `total` between claimants of the given capacities, giving each an even
+/// share of whatever the ones smaller than it could not use.
+///
+/// Terminates because every round either settles at least one claimant or
+/// returns, and `remaining` never goes negative: a claimant only settles when its
+/// cap is strictly below an even share of what is left.
+fn water_fill(total: f64, caps: &[f64]) -> Vec<f64> {
+    let mut taken = vec![0.0; caps.len()];
+    let mut settled = vec![false; caps.len()];
+    let mut remaining = total;
+    loop {
+        let active: Vec<usize> = (0..caps.len()).filter(|&i| !settled[i]).collect();
+        if active.is_empty() {
+            return taken;
+        }
+        let share = remaining / active.len() as f64;
+        let overflowing: Vec<usize> = active
+            .iter()
+            .copied()
+            .filter(|&i| caps[i] < share)
+            .collect();
+        if overflowing.is_empty() {
+            for i in active {
+                taken[i] = share;
+            }
+            return taken;
+        }
+        for i in overflowing {
+            taken[i] = caps[i];
+            settled[i] = true;
+            remaining -= caps[i];
+        }
+    }
+}
+
 /// What leaves a node given what entered it.
 fn transform(grid: &Grid, idx: usize, input: &Flow) -> Flow {
     let cell = grid.cells[idx];
@@ -286,19 +376,15 @@ fn transform(grid: &Grid, idx: usize, input: &Flow) -> Flow {
             }
             out
         }
-        Entity::TransportBelt | Entity::UndergroundBelt => clamp_total(input, BELT_RATE),
-        // A splitter is two belt tiles wide and carries two belts, which is the
-        // whole point of it: one belt in leaves each output half full, two belts
-        // in leave each output full. Capped at a single `BELT_RATE` it throttled
-        // to half of what a plain pair of belts would have carried, and the
-        // model was right to avoid it.
-        Entity::Splitter => {
-            let (w, h) = cell.entity.footprint(cell.direction);
-            clamp_total(input, BELT_RATE * (w * h) as f64)
-        }
-        Entity::Inserter => clamp_total(input, INSERTER_RATE),
-        Entity::Sink => *input,
         Entity::Source | Entity::Empty => NO_FLOW,
+        // Everything else moves what it is given: belts, undergrounds, splitters,
+        // inserters and sinks all pass their input on, capped at what the tile
+        // can carry. A sink's cap is infinite, so it takes everything offered.
+        Entity::TransportBelt
+        | Entity::UndergroundBelt
+        | Entity::Splitter
+        | Entity::Inserter
+        | Entity::Sink => clamp_total(input, intake_cap(grid, idx)),
     }
 }
 
@@ -538,6 +624,73 @@ mod tests {
         g.set(1, 1, inserter(Direction::North));
         g.set(2, 1, anchor(Entity::Sink, Item::IronPlate));
         assert_eq!(score(&g), 0.0);
+    }
+
+    /// The other half of the rule above: behind an inserter is where it picks
+    /// up, and a belt passing through that tile is fair game. What the inserter
+    /// takes is its own swing rate, not the belt's throughput, so the remainder
+    /// stays on the belt for whatever is downstream.
+    #[test]
+    fn an_inserter_taps_a_passing_belt_and_the_rest_flows_on() {
+        //     S > > > K
+        //     . . i . .
+        //     . . K . .
+        let mut g = Grid::new(5, 3);
+        g.set(0, 0, anchor(Entity::Source, Item::IronPlate));
+        for x in 1..4 {
+            g.set(x, 0, Cell::belt(Direction::East));
+        }
+        g.set(4, 0, anchor(Entity::Sink, Item::IronPlate));
+        // Faces south, so it reaches back to (2,0) -- the belt -- and drops at (2,2).
+        g.set(2, 1, inserter(Direction::South));
+        g.set(2, 2, anchor(Entity::Sink, Item::IronPlate));
+
+        let report = throughput(&g);
+        let at = |x, y| {
+            report
+                .deliveries
+                .iter()
+                .find(|d| d.at == (x, y))
+                .unwrap_or_else(|| panic!("no sink at ({x}, {y})"))
+                .achieved
+        };
+        assert!(approx(at(2, 2), INSERTER_RATE), "{}", at(2, 2));
+        assert!(approx(at(4, 0), BELT_RATE - INSERTER_RATE), "{}", at(4, 0));
+    }
+
+    /// Why the tap matters: the issue points out that Factorio raises
+    /// throughput by pulling off one shared line with several inserters in a
+    /// row, and not only by splitting the line first. Each tap takes a full
+    /// swing, so three of them move three times what one does -- from a single
+    /// source, where the assembler_bank lesson would have needed three.
+    #[test]
+    fn taps_in_a_row_each_take_a_full_swing_from_one_belt() {
+        //     S > > > > > >
+        //     . i . i . i .
+        //     . K . K . K .
+        let mut g = Grid::new(7, 3);
+        g.set(0, 0, anchor(Entity::Source, Item::IronPlate));
+        for x in 1..7 {
+            g.set(x, 0, Cell::belt(Direction::East));
+        }
+        for x in [1, 3, 5] {
+            g.set(x, 1, inserter(Direction::South));
+            g.set(x, 2, anchor(Entity::Sink, Item::IronPlate));
+        }
+
+        let report = throughput(&g);
+        assert_eq!(report.deliveries.len(), 3);
+        for delivery in &report.deliveries {
+            assert!(
+                approx(delivery.achieved, INSERTER_RATE),
+                "{:?} took {}",
+                delivery.at,
+                delivery.achieved
+            );
+        }
+        // A belt carries far more than three swings, so nothing is starved and
+        // the taps do not have to share.
+        assert!(approx(report.score, INSERTER_RATE), "{}", report.score);
     }
 
     /// Half a job is worth less than half the score. This is why the mean is a
