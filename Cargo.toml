@@ -67,3 +67,7 @@ path = "experiments/unbounded_sink.rs"
 [[example]]
 name = "reveal_schedule"
 path = "experiments/reveal_schedule.rs"
+
+[[example]]
+name = "sampling_defaults"
+path = "experiments/sampling_defaults.rs"
