@@ -92,6 +92,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: train (${{ matrix.arm }})
         run: |
+          mkdir -p runs
           cargo run --release --bin train -- ${{ matrix.flags }} \
             --steps 3000 --batch 16 --hidden 32 --blocks 4 \
             --val-every 500 --val-batch 128 \
