@@ -563,6 +563,26 @@ mod tests {
         }
     }
 
+    /// `fits` is arithmetic; generation is generate-and-verify. Every caller that
+    /// trusts the first to predict the second is a loop — `bin/sample.rs` holds a
+    /// feasible kind fixed until it generates, so a family that passed `fits` and
+    /// never built would hang it rather than fail it. Checked across the whole
+    /// default pool, since that is the set those loops are handed.
+    #[test]
+    fn a_lesson_that_fits_a_canvas_can_actually_be_built_on_it() {
+        for canvas in TrainConfig::default().canvases {
+            for kind in feasible_kinds(canvas) {
+                let built = (0..60u64).any(|seed| generate(kind, canvas, seed).is_some());
+                assert!(
+                    built,
+                    "{} fits {canvas} but never generated there -- every loop that \
+                     trusts `fits` spins forever on this",
+                    kind.name()
+                );
+            }
+        }
+    }
+
     /// A batch is one tensor and `GridBatch::from_grids` asserts against a ragged
     /// one, so the per-batch draw is load-bearing rather than an optimization.
     #[test]
