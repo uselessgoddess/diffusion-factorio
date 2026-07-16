@@ -415,6 +415,19 @@ impl Cell {
             Channel::Misc => self.misc as usize,
         }
     }
+    /// Rebuild a cell from one category id per channel, in [`Channel`] order.
+    ///
+    /// Returns `None` if any id is out of range for its channel — notably the
+    /// diffusion MASK id, which lives at `VOCAB[c]` and is never a real class.
+    pub fn from_ids(ids: [usize; N_CHANNELS]) -> Option<Self> {
+        Some(Self {
+            entity: Entity::from_id(ids[0])?,
+            direction: Direction::from_id(ids[1])?,
+            item: Item::from_id(ids[2])?,
+            misc: Misc::from_id(ids[3])?,
+        })
+    }
+
     /// Whether channels are mutually consistent (a legal cell). Used by
     /// validation metrics to score whether a decoded factory is well-formed.
     pub fn is_consistent(&self) -> bool {
@@ -439,6 +452,43 @@ impl Cell {
         }
         true
     }
+}
+
+/// Every combination of channel categories that [`Cell::is_consistent`] accepts,
+/// in `[entity, direction, item, misc]` id order.
+///
+/// The product of the four vocabularies is 8·5·6·3 = 720 combinations, of which
+/// only **57** are legal cells. The other 663 are not rare or unlikely — they do
+/// not exist. `TransportBelt` with `Direction::None` is one of them, and it is
+/// what a decoder that picks each channel independently emits whenever the
+/// entity head is sure something is there while the direction head is unsure
+/// which way it faces: the belt's probability mass is split across four
+/// directions, `None`'s is not, so `None` wins the direction argmax on a
+/// plurality while `TransportBelt` wins the entity argmax on a majority. The two
+/// heads are each individually right and the cell they agree on cannot be built.
+///
+/// Enumerating the legal set once lets [`crate::sample`] decode the most likely
+/// *legal* cell instead of the product of four separately-most-likely channels.
+/// The table is small enough to scan per cell (57 × 4 lookups) and exact enough
+/// that no legal factory is ever excluded.
+pub fn legal_cells() -> &'static [[usize; N_CHANNELS]] {
+    static LEGAL: std::sync::OnceLock<Vec<[usize; N_CHANNELS]>> = std::sync::OnceLock::new();
+    LEGAL.get_or_init(|| {
+        let mut out = Vec::new();
+        for e in 0..VOCAB[0] {
+            for d in 0..VOCAB[1] {
+                for i in 0..VOCAB[2] {
+                    for m in 0..VOCAB[3] {
+                        let ids = [e, d, i, m];
+                        if Cell::from_ids(ids).is_some_and(|c| c.is_consistent()) {
+                            out.push(ids);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    })
 }
 
 /// A fixed-size factory grid stored row-major (`idx = y * width + x`).
@@ -607,6 +657,75 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The legal set is the whole reason constrained decoding is cheap: it is a
+    /// 57-row table, not a search. If a channel gains a category this number
+    /// moves, and that is worth noticing rather than absorbing silently.
+    #[test]
+    fn only_fifty_seven_of_seven_hundred_and_twenty_cells_are_legal() {
+        let total: usize = VOCAB.iter().product();
+        assert_eq!(total, 720);
+        assert_eq!(legal_cells().len(), 57);
+        // Per entity: Empty 1, Source 6, Sink 6, belt 4, underground 4×2,
+        // splitter 4, inserter 4, assembler 4×6.
+        let per_entity = |e: Entity| {
+            legal_cells()
+                .iter()
+                .filter(|ids| ids[0] == e as usize)
+                .count()
+        };
+        assert_eq!(per_entity(Entity::Empty), 1);
+        assert_eq!(per_entity(Entity::Source), 6);
+        assert_eq!(per_entity(Entity::Sink), 6);
+        assert_eq!(per_entity(Entity::TransportBelt), 4);
+        assert_eq!(per_entity(Entity::UndergroundBelt), 8);
+        assert_eq!(per_entity(Entity::Splitter), 4);
+        assert_eq!(per_entity(Entity::Inserter), 4);
+        assert_eq!(per_entity(Entity::Assembler), 24);
+    }
+
+    /// Every row of the table is a cell you can actually build, and every cell
+    /// you can build is in the table. The second half is what makes constrained
+    /// decoding lossless rather than merely safe.
+    #[test]
+    fn the_legal_table_is_exactly_the_consistent_cells() {
+        let table: std::collections::HashSet<_> = legal_cells().iter().copied().collect();
+        for e in 0..VOCAB[0] {
+            for d in 0..VOCAB[1] {
+                for i in 0..VOCAB[2] {
+                    for m in 0..VOCAB[3] {
+                        let ids = [e, d, i, m];
+                        let cell = Cell::from_ids(ids).expect("ids are in range");
+                        assert_eq!(
+                            table.contains(&ids),
+                            cell.is_consistent(),
+                            "table and is_consistent disagree about {cell:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The cell the user's export kept rejecting. Named so the next person to
+    /// see `cannot export inconsistent cell` can grep for it.
+    #[test]
+    fn a_belt_facing_nowhere_is_not_a_cell() {
+        let ids = [
+            Entity::TransportBelt as usize,
+            Direction::None as usize,
+            0,
+            0,
+        ];
+        assert!(!Cell::from_ids(ids).unwrap().is_consistent());
+        assert!(!legal_cells().contains(&ids));
+    }
+
+    /// MASK is not a class, so it must not decode to a cell.
+    #[test]
+    fn the_mask_id_is_not_a_category() {
+        assert!(Cell::from_ids([VOCAB[0], 0, 0, 0]).is_none());
+    }
 
     fn assembler() -> Cell {
         Cell {

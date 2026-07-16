@@ -20,6 +20,7 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::data::grid_from_ids;
 use crate::model::Denoiser;
+use crate::world;
 use crate::world::{Grid, N_CHANNELS, VOCAB};
 
 /// Sampler settings.
@@ -230,9 +231,10 @@ fn predict<B: Backend>(
         .collect()
 }
 
-/// Decode a single cell: pick a category per channel (argmax or temperature
-/// sample) and return `(confidence_score, ids)`. The score is the summed log-prob
-/// of the chosen categories — how sure the model is about this whole cell.
+/// Decode a single cell: pick the most likely **legal** combination of the four
+/// channels (argmax or temperature sample) and return its joint log-probability.
+/// The score is how sure the model is about this whole cell, and it is what the
+/// reveal order sorts on.
 #[derive(Clone, Debug)]
 struct CellPrediction {
     score: f64,
@@ -241,6 +243,23 @@ struct CellPrediction {
     entropy: f32,
 }
 
+/// Choose a cell by scoring the 57 legal combinations under the product of the
+/// per-channel heads, rather than choosing each channel on its own.
+///
+/// Picking each channel independently is what put `TransportBelt` next to
+/// `Direction::None` in a factory the user could not import. The heads are not
+/// wrong when that happens — the entity head correctly reports that a belt is
+/// more likely than floor, and the direction head correctly reports that no
+/// single heading beats `None` once the belt's mass is split four ways. The
+/// mistake is in combining them, because their product ranges over 720
+/// combinations and only 57 of those are cells. See [`world::legal_cells`].
+///
+/// Restricting the argmax to the legal set is the same model, read correctly:
+/// it is the maximum-likelihood cell under the network's own distribution given
+/// that a cell must be buildable. It cannot be wrong more often than the
+/// unconstrained argmax is *right*, because every choice it rules out is one no
+/// factory can contain. `Grid::is_consistent` is therefore no longer a
+/// validation metric that can fail at inference — it is an invariant.
 fn decode_cell(
     probs: &[Vec<f32>],
     s: usize,
@@ -249,44 +268,52 @@ fn decode_cell(
     cfg: &SampleConfig,
     rng: &mut ChaCha8Rng,
 ) -> CellPrediction {
-    let mut ids = [0usize; N_CHANNELS];
-    let mut score = 0.0f64;
-    let mut confidence = 0.0f64;
-    let mut entropy = 0.0f64;
-    for c in 0..N_CHANNELS {
-        let k = VOCAB[c];
-        // probs[c] is [n, K, plane]; index (s, j, cell).
-        let p = |j: usize| probs[c][(s * k + j) * plane + cell] as f64;
-        let chosen = if cfg.temperature > 0.0 {
-            sample_index(k, cfg.temperature, &p, rng)
-        } else {
-            argmax_index(k, &p)
-        };
-        ids[c] = chosen;
-        score += (p(chosen).max(1e-9)).ln();
-        confidence += p(chosen);
-        let channel_entropy: f64 = (0..k)
-            .map(|j| {
-                let probability = p(j).max(1e-12);
-                -probability * probability.ln()
-            })
+    // probs[c] is [n, K, plane]; index (s, j, cell).
+    let p = |c: usize, j: usize| probs[c][(s * VOCAB[c] + j) * plane + cell] as f64;
+    let joint = |ids: &[usize; N_CHANNELS]| -> f64 {
+        (0..N_CHANNELS)
+            .map(|c| p(c, ids[c]).max(1e-9).ln())
             .sum::<f64>()
-            / (k as f64).ln();
-        entropy += channel_entropy;
-    }
+    };
+
+    let legal = world::legal_cells();
+    let scores: Vec<f64> = legal.iter().map(joint).collect();
+    let pick = if cfg.temperature > 0.0 {
+        sample_legal(&scores, cfg.temperature, rng)
+    } else {
+        argmax_legal(&scores)
+    };
+    let ids = legal[pick];
+
+    // Diagnostics stay per-channel so the viewer's confidence and entropy
+    // overlays remain comparable across the two decoders.
+    let confidence: f64 = (0..N_CHANNELS).map(|c| p(c, ids[c])).sum::<f64>() / N_CHANNELS as f64;
+    let entropy: f64 = (0..N_CHANNELS)
+        .map(|c| {
+            let k = VOCAB[c];
+            (0..k)
+                .map(|j| {
+                    let probability = p(c, j).max(1e-12);
+                    -probability * probability.ln()
+                })
+                .sum::<f64>()
+                / (k as f64).ln()
+        })
+        .sum::<f64>()
+        / N_CHANNELS as f64;
+
     CellPrediction {
-        score,
+        score: scores[pick],
         ids,
-        confidence: (confidence / N_CHANNELS as f64) as f32,
-        entropy: (entropy / N_CHANNELS as f64) as f32,
+        confidence: confidence as f32,
+        entropy: entropy as f32,
     }
 }
 
-fn argmax_index(k: usize, p: &impl Fn(usize) -> f64) -> usize {
+fn argmax_legal(scores: &[f64]) -> usize {
     let mut best = 0;
     let mut best_v = f64::NEG_INFINITY;
-    for j in 0..k {
-        let v = p(j);
+    for (j, &v) in scores.iter().enumerate() {
         if v > best_v {
             best_v = v;
             best = j;
@@ -295,11 +322,14 @@ fn argmax_index(k: usize, p: &impl Fn(usize) -> f64) -> usize {
     best
 }
 
-/// Temperature-scaled categorical draw from probabilities `p(0..k)`.
-fn sample_index(k: usize, temp: f64, p: &impl Fn(usize) -> f64, rng: &mut ChaCha8Rng) -> usize {
-    // Re-normalize p^(1/temp).
-    let inv = 1.0 / temp;
-    let weights: Vec<f64> = (0..k).map(|j| p(j).max(1e-9).powf(inv)).collect();
+/// Temperature-scaled categorical draw over the legal cells, from their joint
+/// log-probabilities. Softmax is taken in log-space against the maximum so a
+/// long-tailed 57-way distribution cannot underflow to all-zero weights — the
+/// old per-channel version raised probabilities to `1/temp` directly, which is
+/// only safe because each channel had at most eight categories.
+fn sample_legal(scores: &[f64], temp: f64, rng: &mut ChaCha8Rng) -> usize {
+    let top = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let weights: Vec<f64> = scores.iter().map(|s| ((s - top) / temp).exp()).collect();
     let total: f64 = weights.iter().sum();
     let mut r = rng.gen::<f64>() * total;
     for (j, &wgt) in weights.iter().enumerate() {
@@ -308,7 +338,7 @@ fn sample_index(k: usize, temp: f64, p: &impl Fn(usize) -> f64, rng: &mut ChaCha
             return j;
         }
     }
-    k - 1
+    scores.len() - 1
 }
 
 fn to_host(partials: &[Grid], observed: &[Vec<bool>]) -> HostInputs {
@@ -347,6 +377,134 @@ mod tests {
     use crate::backend::CpuBackend;
     use crate::factory_gen::{generate, LessonKind};
     use crate::model::DenoiserConfig;
+    use crate::world::{Cell, Direction, Entity};
+
+    /// Build a one-cell `probs` layout so a decoder can be tested against a
+    /// distribution we choose, with no model in the way. `per_channel[c][j]` is
+    /// the probability the head for channel `c` gives category `j`.
+    fn probs_for(per_channel: [Vec<f32>; N_CHANNELS]) -> Vec<Vec<f32>> {
+        per_channel.into_iter().collect()
+    }
+
+    /// Per-channel argmax over these four heads, spelled out rather than
+    /// trusted. This is what the decoder used to do.
+    fn per_channel_argmax(per_channel: &[Vec<f32>; N_CHANNELS]) -> [usize; N_CHANNELS] {
+        std::array::from_fn(|c| {
+            per_channel[c]
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0
+        })
+    }
+
+    /// A belt whose heading is split four ways, against floor. `None` collects
+    /// the whole 30% that belongs to floor while each real heading is scored on
+    /// its own, so `None` takes the direction argmax on a plurality even though
+    /// the entity head says a belt is here by a majority. Per-channel argmax
+    /// multiplies the two correct answers together and reports a belt facing
+    /// nowhere: `cannot export inconsistent cell`, verbatim.
+    ///
+    /// Reading the same heads jointly keeps the belt *and* commits it east —
+    /// 0.7 × 0.28 beats floor's 0.3 × 0.3. Nothing about the model changed; only
+    /// the illegal way of reading it is gone.
+    #[test]
+    fn a_split_direction_vote_no_longer_builds_a_belt_facing_nowhere() {
+        let mut entity = vec![0.0; VOCAB[0]];
+        entity[Entity::Empty as usize] = 0.3;
+        entity[Entity::TransportBelt as usize] = 0.7;
+        let mut direction = vec![0.0; VOCAB[1]];
+        direction[Direction::None as usize] = 0.3;
+        direction[Direction::East as usize] = 0.28;
+        direction[Direction::North as usize] = 0.16;
+        direction[Direction::South as usize] = 0.16;
+        direction[Direction::West as usize] = 0.1;
+        let mut item = vec![0.0; VOCAB[2]];
+        item[0] = 1.0;
+        let mut misc = vec![0.0; VOCAB[3]];
+        misc[0] = 1.0;
+        let per_channel = [entity, direction, item, misc];
+
+        let old = per_channel_argmax(&per_channel);
+        assert_eq!(old[0], Entity::TransportBelt as usize);
+        assert_eq!(old[1], Direction::None as usize);
+        assert!(
+            !Cell::from_ids(old).unwrap().is_consistent(),
+            "the bug being fixed: per-channel argmax builds a belt facing nowhere"
+        );
+
+        let probs = probs_for(per_channel);
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let got = decode_cell(&probs, 0, 0, 1, &SampleConfig::default(), &mut rng);
+        let cell = Cell::from_ids(got.ids).unwrap();
+        assert!(cell.is_consistent(), "decoded {cell:?}");
+        assert_eq!(cell.entity, Entity::TransportBelt);
+        assert_eq!(cell.direction, Direction::East);
+    }
+
+    /// When the model is genuinely torn — 55% a belt, but so unsure of the
+    /// heading that no single belt cell (0.55 × 0.1375) outscores floor
+    /// (0.45 × 0.45) — the joint decoder answers floor rather than inventing a
+    /// heading it does not believe, and scores the answer low.
+    ///
+    /// The low score is the point. Reveal order sorts on it, so an unresolved
+    /// cell now waits for its neighbours to commit instead of being drawn early
+    /// on the strength of two marginals that were never about the same cell.
+    /// Under the old decoder this cell scored log 0.55 + log 0.45 — confident,
+    /// and wrong.
+    #[test]
+    fn a_cell_the_model_cannot_resolve_scores_low_instead_of_guessing() {
+        let mut entity = vec![0.0; VOCAB[0]];
+        entity[Entity::Empty as usize] = 0.45;
+        entity[Entity::TransportBelt as usize] = 0.55;
+        let mut direction = vec![0.0; VOCAB[1]];
+        direction[Direction::None as usize] = 0.45;
+        for d in [
+            Direction::North,
+            Direction::East,
+            Direction::South,
+            Direction::West,
+        ] {
+            direction[d as usize] = 0.55 / 4.0;
+        }
+        let mut item = vec![0.0; VOCAB[2]];
+        item[0] = 1.0;
+        let mut misc = vec![0.0; VOCAB[3]];
+        misc[0] = 1.0;
+
+        let probs = probs_for([entity, direction, item, misc]);
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let got = decode_cell(&probs, 0, 0, 1, &SampleConfig::default(), &mut rng);
+        let cell = Cell::from_ids(got.ids).unwrap();
+        assert!(cell.is_consistent(), "decoded {cell:?}");
+        assert_eq!(cell.entity, Entity::Empty);
+        // ln(0.45 * 0.45) = -1.6, against the -1.09 the old decoder would have
+        // reported for its unbuildable belt.
+        assert!(got.score < (0.55f64 * 0.45).ln(), "score {}", got.score);
+    }
+
+    /// Constraint, not luck: every legal-set draw is a cell, at any temperature
+    /// and under any distribution the heads produce.
+    #[test]
+    fn no_distribution_and_no_temperature_can_decode_an_illegal_cell() {
+        let mut rng = ChaCha8Rng::seed_from_u64(9);
+        for trial in 0..2_000 {
+            let per_channel: [Vec<f32>; N_CHANNELS] = std::array::from_fn(|c| {
+                let raw: Vec<f32> = (0..VOCAB[c]).map(|_| rng.gen::<f32>()).collect();
+                let total: f32 = raw.iter().sum();
+                raw.into_iter().map(|v| v / total).collect()
+            });
+            let probs = probs_for(per_channel);
+            let cfg = SampleConfig {
+                temperature: if trial % 2 == 0 { 0.0 } else { 1.0 },
+                ..Default::default()
+            };
+            let got = decode_cell(&probs, 0, 0, 1, &cfg, &mut rng);
+            let cell = Cell::from_ids(got.ids).expect("decoded ids are real categories");
+            assert!(cell.is_consistent(), "trial {trial} decoded {cell:?}");
+        }
+    }
 
     #[test]
     fn reconstruct_preserves_observed_and_wellformed_shape() {
