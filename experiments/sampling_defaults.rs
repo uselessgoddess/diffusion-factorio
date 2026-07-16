@@ -31,7 +31,7 @@
 use burn::prelude::Backend;
 use diffusion_factorio::backend::CpuBackend;
 use diffusion_factorio::best_of_n::{best_of_n, usable_score, BestOfN, BestOfNConfig};
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::model::Denoiser;
 use diffusion_factorio::persist;
 use diffusion_factorio::sample::SampleConfig;
@@ -136,7 +136,7 @@ fn main() -> anyhow::Result<()> {
     let (mut partials, mut observed) = (Vec::new(), Vec::new());
     for i in 0..tasks {
         let kind = LessonKind::all()[i % LessonKind::all().len()];
-        let Some(sample) = generate(kind, SIZE, SEED_BASE + i as u64) else {
+        let Some(sample) = generate(kind, Canvas::square(SIZE), SEED_BASE + i as u64) else {
             continue;
         };
         // Only the sources and sinks survive: the model gets the task, not a

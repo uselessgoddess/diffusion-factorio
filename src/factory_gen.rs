@@ -76,26 +76,40 @@ impl LessonKind {
         }
     }
 
-    /// The smallest square grid this family fits on.
+    /// The smallest canvas this family fits on, as width × height.
     ///
-    /// Each generator already refuses a grid it cannot fit, so this is not what
+    /// Each generator already refuses a canvas it cannot fit, so this is not what
     /// makes the curriculum correct — it is what keeps a caller from asking for
     /// a lesson that can never be built and burning [`generate`]'s whole retry
     /// budget discovering it. It lives here because the dimensions do; asked
     /// from `train.rs` it was a guess, and a wrong one (an assembler line is
     /// [`LINE_W`] columns wide, and was listed as needing five).
-    pub fn min_size(self) -> usize {
+    ///
+    /// Width and height are stated separately because the lessons are not
+    /// square. This used to collapse to one number by taking the larger of the
+    /// two, which is what a square curriculum forces and what quietly cost the
+    /// most: a [`LessonKind::CircuitLine`] is 11×5 and was billed as needing 11
+    /// rows it never touches — so on the 13×9 canvas the issue infers on, the
+    /// only chain lesson in the curriculum was ruled out by six rows of nothing.
+    pub fn min_canvas(self) -> Canvas {
         match self {
-            LessonKind::MoveOneItem | LessonKind::MoveOneItemChaos => 3,
-            LessonKind::AssemblerLine => LINE_W,
+            LessonKind::MoveOneItem | LessonKind::MoveOneItemChaos => Canvas::square(3),
+            LessonKind::AssemblerLine => Canvas::new(LINE_W, LINE_H),
             // The machine and its two inserters need 5 across in the worst case;
             // the rest is room for the router to have somewhere to route.
-            LessonKind::AssemblerChaos => 7,
-            LessonKind::UndergroundCross => 7,
-            LessonKind::AssemblerBank => LINE_W.max(LINE_H * BANK_LINES),
-            LessonKind::CircuitLine => CIRCUIT_W.max(CIRCUIT_H),
-            LessonKind::SharedLine => SHARED_W.max(SHARED_H),
+            LessonKind::AssemblerChaos => Canvas::square(7),
+            // One row: `S b d # u b K`.
+            LessonKind::UndergroundCross => Canvas::new(7, 1),
+            LessonKind::AssemblerBank => Canvas::new(LINE_W, LINE_H * BANK_LINES),
+            LessonKind::CircuitLine => Canvas::new(CIRCUIT_W, CIRCUIT_H),
+            LessonKind::SharedLine => Canvas::new(SHARED_W, SHARED_H),
         }
+    }
+
+    /// Can this family be built on `canvas` at all?
+    pub fn fits(self, canvas: Canvas) -> bool {
+        let need = self.min_canvas();
+        canvas.width >= need.width && canvas.height >= need.height
     }
 
     /// Does this family admit more than one valid answer per task?
@@ -117,6 +131,87 @@ impl LessonKind {
 
 /// Parallel lines an [`LessonKind::AssemblerBank`] scaffold offers.
 pub const BANK_LINES: usize = 3;
+
+/// Shortest side the default curriculum draws canvases from.
+///
+/// Nine, because [`LessonKind::AssemblerBank`] is nine rows tall and dropping
+/// the bank would cost an ambiguous family. Everything narrower is still
+/// *generable* — the generators only refuse what does not fit — it is just not
+/// in the default pool.
+pub const DEFAULT_CANVAS_MIN: usize = 9;
+
+/// Longest side the default curriculum draws canvases from.
+///
+/// Fifteen, and the ceiling is the model rather than the generator: a `ResBlock`
+/// tower of the default depth sees `2 * blocks + 1 = 13` cells
+/// (`model::tests::the_default_tower_can_see_across_the_grids_we_train_on`), so
+/// past roughly this width the far corners are joined only by the pooled global
+/// context. Raising it is a config change on both sides, which is the point.
+pub const DEFAULT_CANVAS_MAX: usize = 15;
+
+/// The shape of the world a lesson is generated into.
+///
+/// Every lesson used to be built on `Grid::new(size, size)`, so a square canvas
+/// was the only shape the model was ever shown — while the issue runs inference
+/// on 13×9, and `experiments/grid_shape` measures what that costs: the same
+/// task, unchanged, drops from 3.118 items/s on 11×11 to 0.478 on 13×9.
+///
+/// The alternative was to keep generating squares and pad them into the
+/// rectangle at a random offset, which is cheaper to write and strictly worse to
+/// learn from, for two reasons that `experiments/canvas_curriculum` measures:
+///
+/// * **It cannot show the lessons that matter.** A square lesson of side `s`
+///   padded into `w`×`h` needs `s <= min(w, h)`, so 13×9 admits only lessons
+///   with a min side of 9 — which excludes [`LessonKind::CircuitLine`] and
+///   [`LessonKind::SharedLine`] outright, the only chain and the only splitter
+///   in the curriculum. Generated natively they need 11×5 and 11×7 and fit 13×9
+///   with room over. Padding drops exactly the compositional families the
+///   "invent new solutions" goal rests on.
+/// * **The pad region is a giveaway.** It is provably empty in every label, so
+///   what the model learns from it is "the answer lives inside a square
+///   sub-region" — the opposite of using the space it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Canvas {
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Canvas {
+    pub const fn new(width: usize, height: usize) -> Self {
+        Self { width, height }
+    }
+
+    pub const fn square(side: usize) -> Self {
+        Self::new(side, side)
+    }
+
+    pub const fn area(self) -> usize {
+        self.width * self.height
+    }
+
+    /// An empty grid of this shape.
+    pub fn grid(self) -> Grid {
+        Grid::new(self.width, self.height)
+    }
+
+    /// Every canvas whose sides both fall in `min..=max`.
+    ///
+    /// This is what a curriculum is handed instead of one number. It is a
+    /// *pool*, not a schedule: a shape is drawn per batch (`GridBatch` is one
+    /// tensor and cannot hold a ragged batch), so over a run the model sees
+    /// every shape in it and no cell position is ever reliably empty.
+    pub fn pool(min: usize, max: usize) -> Vec<Canvas> {
+        (min..=max)
+            .flat_map(|height| (min..=max).map(move |width| Canvas::new(width, height)))
+            .collect()
+    }
+}
+
+impl std::fmt::Display for Canvas {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
+    }
+}
 
 /// A generated, known-correct factory plus the bookkeeping needed to blank it.
 #[derive(Debug, Clone)]
@@ -182,21 +277,21 @@ impl Sample {
     }
 }
 
-/// Generate a functional factory for `kind` on a `size`×`size` grid, retrying
-/// with fresh randomness until one validates. Deterministic in `seed`.
-pub fn generate(kind: LessonKind, size: usize, seed: u64) -> Option<Sample> {
+/// Generate a functional factory for `kind` on `canvas`, retrying with fresh
+/// randomness until one validates. Deterministic in `seed`.
+pub fn generate(kind: LessonKind, canvas: Canvas, seed: u64) -> Option<Sample> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let budget = (size * size * 40).max(500);
+    let budget = (canvas.area() * 40).max(500);
     for _ in 0..budget {
         let built = match kind {
-            LessonKind::MoveOneItem => gen_move_one_item(size, &mut rng, false),
-            LessonKind::MoveOneItemChaos => gen_move_one_item(size, &mut rng, true),
-            LessonKind::AssemblerLine => gen_assembler_line(size, &mut rng),
-            LessonKind::AssemblerChaos => gen_assembler_chaos(size, &mut rng),
-            LessonKind::UndergroundCross => gen_underground_cross(size, &mut rng),
-            LessonKind::AssemblerBank => gen_assembler_bank(size, &mut rng),
-            LessonKind::CircuitLine => gen_circuit_line(size, &mut rng),
-            LessonKind::SharedLine => gen_shared_line(size, &mut rng),
+            LessonKind::MoveOneItem => gen_move_one_item(canvas, &mut rng, false),
+            LessonKind::MoveOneItemChaos => gen_move_one_item(canvas, &mut rng, true),
+            LessonKind::AssemblerLine => gen_assembler_line(canvas, &mut rng),
+            LessonKind::AssemblerChaos => gen_assembler_chaos(canvas, &mut rng),
+            LessonKind::UndergroundCross => gen_underground_cross(canvas, &mut rng),
+            LessonKind::AssemblerBank => gen_assembler_bank(canvas, &mut rng),
+            LessonKind::CircuitLine => gen_circuit_line(canvas, &mut rng),
+            LessonKind::SharedLine => gen_shared_line(canvas, &mut rng),
         };
         if let Some(sample) = built {
             debug_assert!(
@@ -213,8 +308,11 @@ pub fn generate(kind: LessonKind, size: usize, seed: u64) -> Option<Sample> {
     None
 }
 
-fn random_cell(size: usize, rng: &mut ChaCha8Rng) -> (usize, usize) {
-    (rng.gen_range(0..size), rng.gen_range(0..size))
+fn random_cell(canvas: Canvas, rng: &mut ChaCha8Rng) -> (usize, usize) {
+    (
+        rng.gen_range(0..canvas.width),
+        rng.gen_range(0..canvas.height),
+    )
 }
 
 fn manhattan(a: (usize, usize), b: (usize, usize)) -> usize {
@@ -302,26 +400,26 @@ fn dir_between(a: (usize, usize), b: (usize, usize)) -> Direction {
     }
 }
 
-fn gen_move_one_item(size: usize, rng: &mut ChaCha8Rng, chaos: bool) -> Option<Sample> {
-    if size < 3 {
+fn gen_move_one_item(canvas: Canvas, rng: &mut ChaCha8Rng, chaos: bool) -> Option<Sample> {
+    if !LessonKind::MoveOneItem.fits(canvas) {
         return None;
     }
-    let mut grid = Grid::new(size, size);
+    let mut grid = canvas.grid();
 
     if chaos {
         // Sprinkle a few obstacles (~10% of cells).
-        let n_obstacles = (size * size / 10).max(1);
+        let n_obstacles = (canvas.area() / 10).max(1);
         for _ in 0..n_obstacles {
-            let (x, y) = random_cell(size, rng);
+            let (x, y) = random_cell(canvas, rng);
             grid.set_obstacle(x, y, true);
         }
     }
 
-    let source = random_cell(size, rng);
+    let source = random_cell(canvas, rng);
     if grid.is_obstacle(source.0, source.1) {
         return None;
     }
-    let sink = random_cell(size, rng);
+    let sink = random_cell(canvas, rng);
     if grid.is_obstacle(sink.0, sink.1) || manhattan(source, sink) < 2 {
         return None;
     }
@@ -407,12 +505,12 @@ const LINE_H: usize = 3;
 /// Only the anchor at (x0+2, y0) stores the machine; the other eight tiles stay
 /// `Empty` and are reached through [`Grid::anchor_at`]. See `world.rs` for why
 /// the shadow is implied rather than stamped.
-fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
-    if size < LINE_W || size < LINE_H {
+fn gen_assembler_line(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    if !LessonKind::AssemblerLine.fits(canvas) {
         return None;
     }
-    let y0 = rng.gen_range(0..=(size - LINE_H));
-    let x0 = rng.gen_range(0..=(size - LINE_W));
+    let y0 = rng.gen_range(0..=(canvas.height - LINE_H));
+    let x0 = rng.gen_range(0..=(canvas.width - LINE_W));
     // One source feeds one machine, so this lesson can only teach the recipes
     // that need one thing. The two-input recipes are [`LessonKind::CircuitLine`].
     let recipe = *Item::single_input_craftable().choose(rng).unwrap();
@@ -420,7 +518,7 @@ fn gen_assembler_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
 
     // The machine's middle row: the one the line runs along.
     let y = y0 + 1;
-    let mut grid = Grid::new(size, size);
+    let mut grid = canvas.grid();
     grid.set(
         x0,
         y,
@@ -522,13 +620,13 @@ const CHAOS_OBSTACLES: usize = 10;
 /// Placing obstacles that the answer *ignores* would be worse than useless: it
 /// inflates every distinctness count while teaching nothing. What makes them
 /// count is that they are in the path.
-fn gen_assembler_chaos(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
-    if size < LessonKind::AssemblerChaos.min_size() {
+fn gen_assembler_chaos(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    if !LessonKind::AssemblerChaos.fits(canvas) {
         return None;
     }
-    let mut grid = Grid::new(size, size);
-    for _ in 0..(size * size / CHAOS_OBSTACLES).max(1) {
-        let (x, y) = random_cell(size, rng);
+    let mut grid = canvas.grid();
+    for _ in 0..(canvas.area() / CHAOS_OBSTACLES).max(1) {
+        let (x, y) = random_cell(canvas, rng);
         grid.set_obstacle(x, y, true);
     }
 
@@ -536,7 +634,10 @@ fn gen_assembler_chaos(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     let input_item = recipe.ingredients()[0].item;
 
     // The machine, wherever its nine tiles happen to be free.
-    let (ax, ay) = (rng.gen_range(0..=(size - 3)), rng.gen_range(0..=(size - 3)));
+    let (ax, ay) = (
+        rng.gen_range(0..=(canvas.width - 3)),
+        rng.gen_range(0..=(canvas.height - 3)),
+    );
     if (ax..ax + 3).any(|x| (ay..ay + 3).any(|y| grid.is_obstacle(x, y))) {
         return None;
     }
@@ -595,11 +696,11 @@ fn gen_assembler_chaos(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     // scoring the whole factory zero.
     let into_machine = dir_toward_footprint(&grid, load, (ax, ay))?;
     let away = dir_toward_footprint(&grid, unload, (ax, ay))?.opposite();
-    let pickup = step(load, into_machine.opposite(), size)?;
-    let drop = step(unload, away, size)?;
+    let pickup = step(load, into_machine.opposite(), canvas)?;
+    let drop = step(unload, away, canvas)?;
 
-    let source = random_cell(size, rng);
-    let sink = random_cell(size, rng);
+    let source = random_cell(canvas, rng);
+    let sink = random_cell(canvas, rng);
     for &c in &[source, sink, pickup, drop] {
         if grid.is_obstacle(c.0, c.1) || grid.anchor_at(c.0, c.1).is_some() {
             return None;
@@ -623,7 +724,7 @@ fn gen_assembler_chaos(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     //
     // The rest of the gear line is routed around the source below. `drop` is
     // placed before either route runs and so has to be rejected here instead.
-    if neighbours(source, size).contains(&drop) {
+    if neighbours(source, canvas).contains(&drop) {
         return None;
     }
     // Everything downstream assumes these six cells are six cells.
@@ -691,7 +792,7 @@ fn gen_assembler_chaos(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     // brushing the plate source picks up more of what it is already carrying,
     // which is harmless -- the crowding-out only bites when the items differ.
     let mut gear_keep_clear = keep_clear.clone();
-    gear_keep_clear.extend(neighbours(source, size));
+    gear_keep_clear.extend(neighbours(source, canvas));
     let (outbound, out_dir) = belt_run(&mut grid, drop, sink, &gear_keep_clear)?;
     removable.extend(outbound);
     grid.set(drop.0, drop.1, Cell::belt(out_dir));
@@ -718,7 +819,7 @@ fn gen_assembler_chaos(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
 ///
 /// Which is exactly the set a 1x1 entity offers its output to, so it is also the
 /// set a belt has to stay out of to avoid being offered something.
-fn neighbours(pos: (usize, usize), size: usize) -> Vec<(usize, usize)> {
+fn neighbours(pos: (usize, usize), canvas: Canvas) -> Vec<(usize, usize)> {
     [
         Direction::North,
         Direction::South,
@@ -726,15 +827,15 @@ fn neighbours(pos: (usize, usize), size: usize) -> Vec<(usize, usize)> {
         Direction::West,
     ]
     .into_iter()
-    .filter_map(|d| step(pos, d, size))
+    .filter_map(|d| step(pos, d, canvas))
     .collect()
 }
 
 /// One step from `pos` along `d`, or `None` if that leaves the board.
-fn step(pos: (usize, usize), d: Direction, size: usize) -> Option<(usize, usize)> {
+fn step(pos: (usize, usize), d: Direction, canvas: Canvas) -> Option<(usize, usize)> {
     let (dx, dy) = d.delta();
     let (x, y) = (pos.0 as i32 + dx, pos.1 as i32 + dy);
-    (x >= 0 && y >= 0 && (x as usize) < size && (y as usize) < size)
+    (x >= 0 && y >= 0 && (x as usize) < canvas.width && (y as usize) < canvas.height)
         .then_some((x as usize, y as usize))
 }
 
@@ -829,17 +930,16 @@ fn belt_run(
 /// A source stands in for an unlimited supply, so all three lines can run flat
 /// out; the ceiling is the input inserter's 0.86 items/s per line, exactly as it
 /// would be in Factorio.
-fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
+fn gen_assembler_bank(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
     // Lines stack back to back: three rows each, and no gap between them, so a
     // bank of three is nine rows tall. The columns are a line's own, plus one
     // for the belt that merges every line into the shared sink.
-    let height = LINE_H * BANK_LINES;
-    let width = LINE_W;
-    if size < width || size < height {
+    let bank = LessonKind::AssemblerBank.min_canvas();
+    if !LessonKind::AssemblerBank.fits(canvas) {
         return None;
     }
-    let y0 = rng.gen_range(0..=(size - height));
-    let x0 = rng.gen_range(0..=(size - width));
+    let y0 = rng.gen_range(0..=(canvas.height - bank.height));
+    let x0 = rng.gen_range(0..=(canvas.width - bank.width));
     // Every line here is fed by one source, so — as in [`gen_assembler_line`] —
     // only the single-input recipes fit.
     let recipe = *Item::single_input_craftable().choose(rng).unwrap();
@@ -848,10 +948,10 @@ fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     // Line `j` is anchored at `machine(j)` and runs along `row(j)`, its middle.
     let machine = |j: usize| (x0 + 2, y0 + LINE_H * j);
     let row = |j: usize| y0 + LINE_H * j + 1;
-    let column = x0 + width - 1;
+    let column = x0 + bank.width - 1;
     let sink = (column, row(BANK_LINES - 1));
 
-    let mut grid = Grid::new(size, size);
+    let mut grid = canvas.grid();
     let mut protected = Vec::new();
     for j in 0..BANK_LINES {
         grid.set(
@@ -884,8 +984,8 @@ fn gen_assembler_bank(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     // whole bank instead asks the model the question we mean to ask: how many
     // lines belong here?
     let mut removable = Vec::new();
-    for y in y0..y0 + height {
-        for x in x0..x0 + width {
+    for y in y0..y0 + bank.height {
+        for x in x0..x0 + bank.width {
             let i = grid.idx(x, y);
             if !protected.contains(&i) {
                 removable.push(i);
@@ -998,12 +1098,12 @@ const CABLE_FEEDS: usize = 3;
 /// adds nothing, because by then the *copper* inserter into the cable machine is
 /// the binding constraint — which is a fact about the layout that only a graded
 /// score can state, and `functional` calls all three answers perfect.
-fn gen_circuit_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
-    if size < CIRCUIT_W || size < CIRCUIT_H {
+fn gen_circuit_line(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    if !LessonKind::CircuitLine.fits(canvas) {
         return None;
     }
-    let x0 = rng.gen_range(0..=(size - CIRCUIT_W));
-    let y0 = rng.gen_range(0..=(size - CIRCUIT_H));
+    let x0 = rng.gen_range(0..=(canvas.width - CIRCUIT_W));
+    let y0 = rng.gen_range(0..=(canvas.height - CIRCUIT_H));
 
     // The row the line runs along: the machines' middle.
     let y = y0 + 3;
@@ -1013,7 +1113,7 @@ fn gen_circuit_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     let copper_source = (x0, y);
     let sink = (x0 + CIRCUIT_W - 1, y);
 
-    let mut grid = Grid::new(size, size);
+    let mut grid = canvas.grid();
     grid.set(
         copper_source.0,
         copper_source.1,
@@ -1112,17 +1212,17 @@ fn inserter(direction: Direction) -> Cell {
     }
 }
 
-fn gen_underground_cross(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
+fn gen_underground_cross(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
     // Horizontal line with an obstacle wall the belts tunnel under:
     // S b d # u b K   (wall at the '#').
-    if size < 7 {
+    if !LessonKind::UndergroundCross.fits(canvas) {
         return None;
     }
-    let y = rng.gen_range(0..size);
-    let x0 = rng.gen_range(0..=(size - 7));
+    let y = rng.gen_range(0..canvas.height);
+    let x0 = rng.gen_range(0..=(canvas.width - 7));
     let item = *[Item::IronPlate, Item::CopperPlate].choose(rng).unwrap();
 
-    let mut grid = Grid::new(size, size);
+    let mut grid = canvas.grid();
     let wall = x0 + 3;
     grid.set_obstacle(wall, y, true);
 
@@ -1241,12 +1341,12 @@ const SHARED_H: usize = 7;
 ///
 /// Only single-input recipes fit, as in [`gen_assembler_line`]: there is one
 /// source, so there is one ingredient.
-fn gen_shared_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
-    if size < SHARED_W || size < SHARED_H {
+fn gen_shared_line(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    if !LessonKind::SharedLine.fits(canvas) {
         return None;
     }
-    let x0 = rng.gen_range(0..=(size - SHARED_W));
-    let y0 = rng.gen_range(0..=(size - SHARED_H));
+    let x0 = rng.gen_range(0..=(canvas.width - SHARED_W));
+    let y0 = rng.gen_range(0..=(canvas.height - SHARED_H));
     let recipe = *Item::single_input_craftable().choose(rng).unwrap();
     let input_item = recipe.ingredients()[0].item;
 
@@ -1257,7 +1357,7 @@ fn gen_shared_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     let collector = x0 + SHARED_W - 1;
     let sink = (collector, row(SHARED_LINES - 1));
 
-    let mut grid = Grid::new(size, size);
+    let mut grid = canvas.grid();
     grid.set(
         x0,
         y0,
@@ -1443,7 +1543,8 @@ mod tests {
         ] {
             let mut answers: HashMap<String, HashSet<String>> = HashMap::new();
             for seed in 0..2_000u64 {
-                let Some(sample) = generate(LessonKind::AssemblerBank, 11, seed) else {
+                let Some(sample) = generate(LessonKind::AssemblerBank, Canvas::square(11), seed)
+                else {
                     continue;
                 };
                 let observed = observe(&sample);
@@ -1488,7 +1589,7 @@ mod tests {
     fn the_bank_answers_are_not_equally_good() {
         let mut by_rate: HashMap<String, Vec<f64>> = HashMap::new();
         for seed in 0..2_000u64 {
-            let Some(sample) = generate(LessonKind::AssemblerBank, 11, seed) else {
+            let Some(sample) = generate(LessonKind::AssemblerBank, Canvas::square(11), seed) else {
                 continue;
             };
             let (_, observed) = sample.blank_to_scaffold();
@@ -1526,7 +1627,7 @@ mod tests {
         // in rate, so group by recipe and compare like with like.
         let mut by_recipe: HashMap<(u8, usize), f64> = HashMap::new();
         for seed in 0..2_000u64 {
-            let Some(sample) = generate(LessonKind::AssemblerBank, 11, seed) else {
+            let Some(sample) = generate(LessonKind::AssemblerBank, Canvas::square(11), seed) else {
                 continue;
             };
             let lines = sample
@@ -1573,7 +1674,7 @@ mod tests {
         for &kind in LessonKind::all() {
             let mut ok = 0;
             for seed in 0..40u64 {
-                if let Some(s) = generate(kind, 11, seed) {
+                if let Some(s) = generate(kind, Canvas::square(11), seed) {
                     assert!(s.solution.is_consistent(), "{}: inconsistent", kind.name());
                     assert!(
                         item_reaches_sink(&s.solution),
@@ -1608,7 +1709,7 @@ mod tests {
     fn every_inserter_pushes_into_something_real() {
         for &kind in LessonKind::all() {
             for seed in 0..60u64 {
-                let Some(s) = generate(kind, 11, seed) else {
+                let Some(s) = generate(kind, Canvas::square(11), seed) else {
                     continue;
                 };
                 let g = &s.solution;
@@ -1681,7 +1782,7 @@ mod tests {
 
         let shapes = |kind| -> usize {
             (0..200u64)
-                .filter_map(|seed| generate(kind, 11, seed))
+                .filter_map(|seed| generate(kind, Canvas::square(11), seed))
                 .map(|s| answer_shape(&s))
                 .collect::<HashSet<_>>()
                 .len()
@@ -1703,7 +1804,7 @@ mod tests {
 
     #[test]
     fn blanking_masks_removable_cells() {
-        let s = generate(LessonKind::MoveOneItem, 11, 7).expect("gen");
+        let s = generate(LessonKind::MoveOneItem, Canvas::square(11), 7).expect("gen");
         let mut rng = ChaCha8Rng::seed_from_u64(1);
         let (partial, observed) = s.blank(None, &mut rng);
         // Every removable cell is now empty and unobserved.
@@ -1721,7 +1822,7 @@ mod tests {
     #[test]
     fn blanking_to_scaffold_leaves_only_the_source_and_sink() {
         for &kind in LessonKind::all() {
-            let Some(s) = generate(kind, 11, 7) else {
+            let Some(s) = generate(kind, Canvas::square(11), 7) else {
                 continue;
             };
             let (partial, observed) = s.blank_to_scaffold();
@@ -1745,7 +1846,7 @@ mod tests {
     /// it without ever having decided what to build.
     #[test]
     fn blanking_to_scaffold_asks_for_far_more_than_inpainting() {
-        let s = generate(LessonKind::AssemblerLine, 11, 7).expect("gen");
+        let s = generate(LessonKind::AssemblerLine, Canvas::square(11), 7).expect("gen");
         let mut rng = ChaCha8Rng::seed_from_u64(1);
         let (_, inpaint) = s.blank(None, &mut rng);
         let (_, scratch) = s.blank_to_scaffold();
@@ -1807,7 +1908,7 @@ mod tests {
     fn every_circuit_line_actually_delivers_circuits() {
         let mut built = 0;
         for seed in 0..200u64 {
-            let Some(sample) = generate(LessonKind::CircuitLine, 11, seed) else {
+            let Some(sample) = generate(LessonKind::CircuitLine, Canvas::square(11), seed) else {
                 continue;
             };
             built += 1;
@@ -1845,7 +1946,7 @@ mod tests {
     fn the_second_cable_feed_doubles_the_circuit_line_and_the_third_does_not() {
         let mut by_feeds: HashMap<usize, f64> = HashMap::new();
         for seed in 0..200u64 {
-            let Some(sample) = generate(LessonKind::CircuitLine, 11, seed) else {
+            let Some(sample) = generate(LessonKind::CircuitLine, Canvas::square(11), seed) else {
                 continue;
             };
             let rate = throughput::score(&sample.solution);
@@ -1887,7 +1988,7 @@ mod tests {
     /// ingredient?" and a two-ingredient recipe has no answer to that.
     #[test]
     fn a_circuit_machine_starved_of_either_input_crafts_nothing() {
-        let sample = generate(LessonKind::CircuitLine, 11, 0).expect("gen");
+        let sample = generate(LessonKind::CircuitLine, Canvas::square(11), 0).expect("gen");
         assert!(item_reaches_sink(&sample.solution));
 
         for starve in [Item::IronPlate, Item::CopperPlate] {
@@ -1915,7 +2016,7 @@ mod tests {
     fn every_shared_line_actually_delivers() {
         let mut built = 0;
         for seed in 0..200u64 {
-            let Some(sample) = generate(LessonKind::SharedLine, 11, seed) else {
+            let Some(sample) = generate(LessonKind::SharedLine, Canvas::square(11), seed) else {
                 continue;
             };
             built += 1;
@@ -1962,7 +2063,7 @@ mod tests {
     fn one_source_split_two_ways_delivers_twice_what_one_branch_does() {
         let mut by_recipe: HashMap<(u8, usize), f64> = HashMap::new();
         for seed in 0..2_000u64 {
-            let Some(sample) = generate(LessonKind::SharedLine, 11, seed) else {
+            let Some(sample) = generate(LessonKind::SharedLine, Canvas::square(11), seed) else {
                 continue;
             };
             let branches = sample
@@ -2035,7 +2136,7 @@ mod tests {
         let mut seen: HashSet<u8> = HashSet::new();
         for &kind in LessonKind::all() {
             for seed in 0..50u64 {
-                let Some(sample) = generate(kind, 13, seed) else {
+                let Some(sample) = generate(kind, Canvas::square(13), seed) else {
                     continue;
                 };
                 seen.extend(sample.solution.cells.iter().map(|c| c.entity as u8));

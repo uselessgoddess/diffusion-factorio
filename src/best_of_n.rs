@@ -287,7 +287,7 @@ fn digest(grid: &Grid) -> u64 {
 mod tests {
     use super::*;
     use crate::backend::CpuBackend;
-    use crate::factory_gen::{generate, LessonKind};
+    use crate::factory_gen::{generate, Canvas, LessonKind};
     use crate::model::DenoiserConfig;
     use crate::sample::reconstruct;
     use crate::world::{Cell, Direction, Entity, Item};
@@ -304,7 +304,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(11);
         let (mut partials, mut observed) = (Vec::new(), Vec::new());
         for seed in 0..n as u64 {
-            let sample = generate(LessonKind::MoveOneItem, 7, seed + 1).unwrap();
+            let sample = generate(LessonKind::MoveOneItem, Canvas::square(7), seed + 1).unwrap();
             let (partial, obs) = sample.blank(None, &mut rng);
             partials.push(partial);
             observed.push(obs);

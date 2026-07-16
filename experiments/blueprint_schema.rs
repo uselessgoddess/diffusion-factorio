@@ -13,7 +13,7 @@
 //! Then paste the printed string into https://fbe.teoxoy.com/ to confirm.
 
 use diffusion_factorio::blueprint::{blueprint_json, blueprint_string, grid_to_blueprint};
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::textual::render;
 
 /// The three properties the blueprint schema lists as required.
@@ -21,7 +21,7 @@ const REQUIRED: [&str; 3] = ["version", "item", "icons"];
 
 fn main() -> anyhow::Result<()> {
     for &kind in LessonKind::all() {
-        let Some(sample) = generate(kind, 11, 7) else {
+        let Some(sample) = generate(kind, Canvas::square(11), 7) else {
             continue;
         };
         let envelope = grid_to_blueprint(&sample.solution, format!("{} lesson", kind.name()))?;

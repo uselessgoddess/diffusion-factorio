@@ -1,6 +1,6 @@
 use base64::Engine;
 use diffusion_factorio::blueprint::{blueprint_json, blueprint_string, grid_to_blueprint};
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::textual::render;
 use diffusion_factorio::world::{Cell, Direction, Entity, Grid, Item, Misc};
 use flate2::read::ZlibDecoder;
@@ -329,7 +329,7 @@ fn no_generated_factory_exports_overlapping_entities() {
     for &kind in LessonKind::all() {
         let mut built = 0;
         for seed in 0..64 {
-            let Some(sample) = generate(kind, 11, seed) else {
+            let Some(sample) = generate(kind, Canvas::square(11), seed) else {
                 continue;
             };
             built += 1;

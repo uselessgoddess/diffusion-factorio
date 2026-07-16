@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use diffusion_factorio::best_of_n::{best_of_n, BestOfN, BestOfNConfig};
 use diffusion_factorio::blueprint::{blueprint_string, grid_to_blueprint};
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::metrics::reconstruction_report;
 use diffusion_factorio::observability::{write_sample_report, SampleReportEntry};
 use diffusion_factorio::persist;
@@ -93,7 +93,7 @@ fn main() -> anyhow::Result<()> {
     while originals.len() < args.eval {
         let kind = LessonKind::all()[originals.len() % LessonKind::all().len()];
         ctr += 1;
-        if let Some(s) = generate(kind, args.size, ctr) {
+        if let Some(s) = generate(kind, Canvas::square(args.size), ctr) {
             let (partial, obs) = s.blank(None, &mut rng);
             originals.push(s.solution);
             partials.push(partial);

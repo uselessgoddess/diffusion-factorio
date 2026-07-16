@@ -391,7 +391,7 @@ fn to_host(partials: &[Grid], observed: &[Vec<bool>]) -> HostInputs {
 mod tests {
     use super::*;
     use crate::backend::CpuBackend;
-    use crate::factory_gen::{generate, LessonKind};
+    use crate::factory_gen::{generate, Canvas, LessonKind};
     use crate::model::DenoiserConfig;
     use crate::world::{Cell, Direction, Entity};
 
@@ -582,7 +582,7 @@ mod tests {
     fn reconstruct_preserves_observed_and_wellformed_shape() {
         type B = CpuBackend;
         let device = Default::default();
-        let s = generate(LessonKind::MoveOneItem, 11, 4).unwrap();
+        let s = generate(LessonKind::MoveOneItem, Canvas::square(11), 4).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(2);
         let (partial, observed) = s.blank(None, &mut rng);
 
@@ -616,7 +616,7 @@ mod tests {
     fn diagnostics_cover_every_cell_with_bounded_uncertainty() {
         type B = CpuBackend;
         let device = Default::default();
-        let sample = generate(LessonKind::MoveOneItem, 7, 9).unwrap();
+        let sample = generate(LessonKind::MoveOneItem, Canvas::square(7), 9).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(3);
         let (partial, observed) = sample.blank(None, &mut rng);
         let model = DenoiserConfig::new()

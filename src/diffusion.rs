@@ -222,14 +222,14 @@ fn scalar<B: Backend, const D: usize>(t: Tensor<B, D>) -> f64 {
 mod tests {
     use super::*;
     use crate::backend::CpuBackend;
-    use crate::factory_gen::{generate, LessonKind};
+    use crate::factory_gen::{generate, Canvas, LessonKind};
     use crate::model::DenoiserConfig;
 
     #[test]
     fn masking_leaves_observed_cells_untouched() {
         type B = CpuBackend;
         let device = Default::default();
-        let s = generate(LessonKind::MoveOneItem, 11, 5).unwrap();
+        let s = generate(LessonKind::MoveOneItem, Canvas::square(11), 5).unwrap();
         let observed: Vec<bool> = (0..s.solution.len())
             .map(|i| s.protected.contains(&i))
             .collect();
@@ -252,7 +252,7 @@ mod tests {
     fn loss_is_finite_and_positive() {
         type B = CpuBackend;
         let device = Default::default();
-        let s = generate(LessonKind::MoveOneItem, 11, 1).unwrap();
+        let s = generate(LessonKind::MoveOneItem, Canvas::square(11), 1).unwrap();
         let batch = GridBatch::<B>::from_grids(std::slice::from_ref(&s.solution), None, &device);
         let model = DenoiserConfig::new()
             .with_hidden(16)

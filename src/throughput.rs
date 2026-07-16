@@ -465,7 +465,7 @@ fn positions(grid: &Grid, kind: Entity) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factory_gen::{self, LessonKind};
+    use crate::factory_gen::{self, Canvas, LessonKind};
     use crate::sim::item_reaches_sink;
     use crate::world::{Cell, Direction, Misc};
 
@@ -877,7 +877,7 @@ mod tests {
     fn every_generated_solution_scores_above_zero() {
         for &kind in LessonKind::all() {
             for seed in 0..200u64 {
-                let Some(sample) = factory_gen::generate(kind, 11, seed) else {
+                let Some(sample) = factory_gen::generate(kind, Canvas::square(11), seed) else {
                     continue;
                 };
                 assert!(

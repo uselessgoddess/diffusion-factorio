@@ -149,7 +149,7 @@ fn html_report_embeds_parameters_and_metric_charts() {
     let path = temp_file("training-report.html");
     let metadata = RunMetadata {
         backend: "ndarray (CPU)".into(),
-        grid_size: 11,
+        canvases: "11x11".to_owned(),
         steps: 200,
         batch_size: 32,
         val_batch: 64,

@@ -103,13 +103,13 @@ pub fn grid_from_ids(ids: &[i32], height: usize, width: usize, obstacle: &[bool]
 mod tests {
     use super::*;
     use crate::backend::CpuBackend;
-    use crate::factory_gen::{generate, LessonKind};
+    use crate::factory_gen::{generate, Canvas, LessonKind};
 
     #[test]
     fn roundtrip_grid_through_tensor() {
         type B = CpuBackend;
         let device = Default::default();
-        let s = generate(LessonKind::MoveOneItem, 11, 3).unwrap();
+        let s = generate(LessonKind::MoveOneItem, Canvas::square(11), 3).unwrap();
         let batch = GridBatch::<B>::from_grids(std::slice::from_ref(&s.solution), None, &device);
 
         let data = batch.tokens.to_data();

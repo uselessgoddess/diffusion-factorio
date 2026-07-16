@@ -16,7 +16,7 @@
 //! ```
 
 use diffusion_factorio::{
-    factory_gen::{generate, LessonKind},
+    factory_gen::{generate, Canvas, LessonKind},
     throughput::throughput,
     world::{Entity, Grid, Item},
 };
@@ -70,7 +70,7 @@ fn main() {
     for &kind in LessonKind::all() {
         let (mut k_lessons, mut k_touching, mut k_counted, mut k_nonfinite) = (0, 0, 0, 0);
         for seed in 0..PER_KIND {
-            let Some(sample) = generate(kind, 11, seed) else {
+            let Some(sample) = generate(kind, Canvas::square(11), seed) else {
                 continue;
             };
             k_lessons += 1;

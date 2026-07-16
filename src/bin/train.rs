@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use diffusion_factorio::diffusion::DiffusionConfig;
+use diffusion_factorio::factory_gen::{Canvas, DEFAULT_CANVAS_MAX, DEFAULT_CANVAS_MIN};
 use diffusion_factorio::model::DenoiserConfig;
 use diffusion_factorio::observability::{write_training_report, MetricsWriter, RunMetadata};
 use diffusion_factorio::persist;
@@ -20,8 +21,21 @@ type TrainBackend = diffusion_factorio::backend::CpuAutodiff;
 #[derive(Parser)]
 #[command(about = "Train the masked-diffusion factory denoiser")]
 struct Args {
-    #[arg(long, default_value_t = 11)]
-    size: usize,
+    /// Train on one square canvas of this side, instead of the shape pool.
+    ///
+    /// This is the old square-only curriculum, kept because it is the control
+    /// the shape-mixed default has to beat — the `curriculum` CI job trains both
+    /// and scores them on the issue's 13x9. It is not a good way to train:
+    /// see `docs/GENERALIZATION.md` cause 5.
+    #[arg(long)]
+    size: Option<usize>,
+    /// Shortest canvas side the curriculum draws.
+    #[arg(long, default_value_t = DEFAULT_CANVAS_MIN)]
+    canvas_min: usize,
+    /// Longest canvas side the curriculum draws. Every width x height in
+    /// `canvas_min..=canvas_max` is drawn from, one shape per batch.
+    #[arg(long, default_value_t = DEFAULT_CANVAS_MAX)]
+    canvas_max: usize,
     #[arg(long, default_value_t = 5000)]
     steps: usize,
     #[arg(long, default_value_t = 32)]
@@ -66,6 +80,21 @@ struct Args {
     report_out: PathBuf,
 }
 
+/// A pool of shapes, short enough for a log line and a report card.
+fn canvas_summary(canvases: &[Canvas]) -> String {
+    match canvases {
+        [] => "none".to_owned(),
+        [one] => one.to_string(),
+        many => {
+            let min_w = many.iter().map(|c| c.width).min().unwrap_or(0);
+            let max_w = many.iter().map(|c| c.width).max().unwrap_or(0);
+            let min_h = many.iter().map(|c| c.height).min().unwrap_or(0);
+            let max_h = many.iter().map(|c| c.height).max().unwrap_or(0);
+            format!("{min_w}x{min_h} .. {max_w}x{max_h}")
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let device: burn::tensor::Device<TrainBackend> = Default::default();
@@ -73,8 +102,12 @@ fn main() -> anyhow::Result<()> {
     let model_cfg = DenoiserConfig::new()
         .with_hidden(args.hidden)
         .with_blocks(args.blocks);
+    let canvases = match args.size {
+        Some(side) => vec![Canvas::square(side)],
+        None => Canvas::pool(args.canvas_min, args.canvas_max),
+    };
     let cfg = TrainConfig {
-        grid_size: args.size,
+        canvases,
         steps: args.steps,
         batch_size: args.batch,
         lr: args.lr,
@@ -100,8 +133,10 @@ fn main() -> anyhow::Result<()> {
         }
     );
     println!(
-        "training {} steps on {}x{} grids...",
-        cfg.steps, cfg.grid_size, cfg.grid_size
+        "training {} steps on {} canvas shape(s): {}...",
+        cfg.steps,
+        cfg.canvases.len(),
+        canvas_summary(&cfg.canvases)
     );
 
     let mut metrics_writer = MetricsWriter::create(&args.metrics_out)?;
@@ -121,7 +156,7 @@ fn main() -> anyhow::Result<()> {
         } else {
             "ndarray (CPU)".to_owned()
         },
-        grid_size: cfg.grid_size,
+        canvases: canvas_summary(&cfg.canvases),
         steps: cfg.steps,
         batch_size: cfg.batch_size,
         val_batch: cfg.val_batch,

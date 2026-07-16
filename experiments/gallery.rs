@@ -15,7 +15,7 @@
 //! the real game and the picture stops being our opinion of the layout.
 
 use diffusion_factorio::blueprint::{blueprint_string, grid_to_blueprint};
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::sim::item_reaches_sink;
 use diffusion_factorio::throughput::throughput;
 use diffusion_factorio::viewer::grid_to_svg;
@@ -36,7 +36,7 @@ fn main() -> anyhow::Result<()> {
         let mut tiles = String::new();
         let mut drawn = 0;
         for seed in 0..SEEDS {
-            let Some(sample) = generate(kind, SIZE, seed) else {
+            let Some(sample) = generate(kind, Canvas::square(SIZE), seed) else {
                 continue;
             };
             drawn += 1;
