@@ -171,6 +171,9 @@ for the mapping and current simulation-parity limits.
   and why RL is still not next.
 - [`docs/TRAINING_ANALYSIS.md`](docs/TRAINING_ANALYSIS.md) — what the first
   converged GPU run does and does not prove, with re-derivable numbers.
+- [`docs/GENERALIZATION.md`](docs/GENERALIZATION.md) — why a 10,000-step run that
+  reads `loss 0.1079 / acc 0.98` still builds factories that deliver nothing, and
+  which of the five causes were the model's fault (none of the first four).
 - [`docs/ANALYSIS.md`](docs/ANALYSIS.md) — reference analysis: what to borrow, what to reject.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the masked-diffusion design in detail.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — bottlenecks (ranked) and next steps.

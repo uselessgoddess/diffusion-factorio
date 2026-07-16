@@ -53,6 +53,8 @@ The reference is a hybrid: a Python model/training stack (`factorion.py`,
 1. **The `FOOTPRINT` data leak.** In the reference, the buildable-footprint
    channel at one point effectively encoded *where the answer went* (only the
    correct placement cells were marked buildable), letting the model cheat.
+   This is history on both sides now — the reference has since fixed it upstream,
+   so read this entry as a design rationale rather than as a live criticism.
    → We make obstacles a **separate conditioning input** that never encodes where
    entities should go (`Grid::obstacle`), and it is *not* a generative channel.
    A blank grid has no obstacles by default.
