@@ -17,6 +17,7 @@
 //! * [`sample`] — inference / sampling & functional validation.
 //! * [`best_of_n`] — draw several factories, keep the one the simulator prefers.
 //! * [`viewer`] — draw a factory as SVG, at the footprints Factorio enforces.
+//! * [`serve`] — pose a task by hand and watch the model design it, over HTTP.
 
 pub mod backend;
 pub mod best_of_n;
@@ -29,6 +30,7 @@ pub mod model;
 pub mod observability;
 pub mod persist;
 pub mod sample;
+pub mod serve;
 pub mod sim;
 pub mod textual;
 pub mod throughput;

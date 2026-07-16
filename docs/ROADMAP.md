@@ -8,6 +8,10 @@ now, what the known bottlenecks are (ranked), and the concrete next steps.
 Analysis of the 5,000-step GPU run, and why RL is still not the next step:
 [`docs/RL_ANALYSIS.md`](RL_ANALYSIS.md).
 
+How to read a training log without fooling yourself, what to watch locally while
+a run is going, and how to pose the model a task nobody generated:
+[`docs/INFERENCE_AND_TRAINING.md`](INFERENCE_AND_TRAINING.md).
+
 ## Status: what works today
 
 - **World model** (`src/world.rs`) — 4-channel categorical grid, consistency
@@ -16,10 +20,12 @@ Analysis of the 5,000-step GPU run, and why RL is still not the next step:
   undergrounds, inserters, assemblers; a fixpoint over the item **sets** that
   reach each cell, so a machine runs only once *every* ingredient arrives.
   ✅ unit-tested.
-- **Lesson generator** (`src/factory_gen.rs`) — 6 lesson kinds, built by
+- **Lesson generator** (`src/factory_gen.rs`) — 8 lesson kinds, built by
   construction and verified functional; blanking into (partial, solution) pairs.
-  Two of them (`ASSEMBLER_BANK`, `CIRCUIT_LINE`) admit **many** valid answers
-  per task. ✅ unit-tested.
+  Three of them (`ASSEMBLER_BANK`, `CIRCUIT_LINE`, `SHARED_LINE`) admit **many**
+  valid answers per task. `SHARED_LINE` is the only one that teaches one input
+  line feeding many machines — by splitter, or by inserters tapping it in
+  sequence — and the only one that draws a `Splitter` at all. ✅ unit-tested.
 - **Graded throughput** (`src/throughput.rs`) — items/second per sink, folded by
   a power mean at `p=0.5`. Ranks two *working* factories against each other.
   ✅ unit-tested.
@@ -362,7 +368,7 @@ and neither was visible in the ASCII render:
 Both were found with `experiments/why_zero.rs`, which hunts factories that are
 functional but score zero and dumps the cells rather than the glyphs — the render
 draws an inserter as `i` whichever way the hand swings, which is precisely the bug.
-All seven families now report 0 of 200. **`UNDERGROUND_CROSS`, `ASSEMBLER_BANK`
+All eight families now report 0 of 200, `SHARED_LINE` included. **`UNDERGROUND_CROSS`, `ASSEMBLER_BANK`
 and `CIRCUIT_LINE` are still templates** and want the same treatment; the bank is
 the interesting one, since it is the only family that is honestly ambiguous and
 that property has to survive the randomization.
