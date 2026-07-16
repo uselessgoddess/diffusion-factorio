@@ -45,6 +45,27 @@ impl Default for SampleConfig {
     }
 }
 
+/// How many of a task's cells are still masked after `done` of `steps` rounds.
+///
+/// The cosine schedule: the model commits few cells early, when almost nothing is
+/// decided and its predictions are worth little, and most of them late, once the
+/// context is dense. `masked0 * cos(π/2 · done/steps)`, hitting exactly zero on
+/// the final round.
+///
+/// The shape has a cost the issue noticed: the reveal *rate* is the derivative of
+/// the cosine, so it is steepest at the end. At `steps = 12` the last three rounds
+/// commit 38% of the grid between them, which is why the animation looks like the
+/// factory appears all at once, and why raising `steps` visibly helps — it is not
+/// more thinking so much as a gentler final slope. See
+/// `experiments/reveal_schedule.rs`.
+pub fn still_masked_after(done: usize, steps: usize, masked0: usize) -> usize {
+    if done >= steps {
+        return 0;
+    }
+    let frac = (std::f64::consts::FRAC_PI_2 * done as f64 / steps as f64).cos();
+    (masked0 as f64 * frac).round() as usize
+}
+
 /// A reconstruction plus spatial uncertainty captured when each generated cell
 /// was committed by the reverse-diffusion schedule.
 #[derive(Clone, Debug)]
@@ -150,12 +171,7 @@ pub fn reconstruct_with_diagnostics<B: Backend>(
             if remaining == 0 {
                 continue;
             }
-            let frac = (std::f64::consts::FRAC_PI_2 * (step + 1) as f64 / steps as f64).cos();
-            let should_remain = if step + 1 == steps {
-                0
-            } else {
-                (masked0[s] as f64 * frac).round() as usize
-            };
+            let should_remain = still_masked_after(step + 1, steps, masked0[s]);
             let reveal = remaining
                 .saturating_sub(should_remain)
                 .max(1)
@@ -384,6 +400,62 @@ mod tests {
     /// the probability the head for channel `c` gives category `j`.
     fn probs_for(per_channel: [Vec<f32>; N_CHANNELS]) -> Vec<Vec<f32>> {
         per_channel.into_iter().collect()
+    }
+
+    /// The schedule has to reach zero on the last round, or the sampler would
+    /// hand back a grid with MASK still in it. The `.max(1)` floor at the call
+    /// site hides a violation for small grids by forcing a reveal anyway, so it
+    /// is stated here where nothing can cover for it.
+    #[test]
+    fn the_schedule_leaves_nothing_masked_at_the_end() {
+        for steps in [1, 2, 4, 12, 24, 64] {
+            for masked0 in [1, 7, 115, 1024] {
+                assert_eq!(
+                    still_masked_after(steps, steps, masked0),
+                    0,
+                    "steps={steps} masked0={masked0}"
+                );
+            }
+        }
+    }
+
+    /// Cells are committed, never un-committed: the count still masked can only
+    /// fall. A schedule that rose would ask the loop to reveal a negative number
+    /// of cells, which `saturating_sub` would silently read as zero.
+    #[test]
+    fn the_schedule_never_asks_for_a_cell_back() {
+        let (steps, masked0) = (12, 115);
+        for done in 0..steps {
+            assert!(
+                still_masked_after(done + 1, steps, masked0)
+                    <= still_masked_after(done, steps, masked0),
+                "round {done} masks more than round {}",
+                done + 1
+            );
+        }
+        assert_eq!(still_masked_after(0, steps, masked0), masked0);
+    }
+
+    /// The concentration the issue saw as "the whole factory appears in the last
+    /// 2-3 frames". It is the schedule, not the model: at the default 12 steps the
+    /// last three rounds commit over a third of the grid, and doubling the steps
+    /// roughly halves that. See `experiments/reveal_schedule.rs`.
+    #[test]
+    fn most_of_the_grid_is_committed_in_the_last_few_rounds() {
+        let masked0 = 115;
+        let tail =
+            |steps: usize| still_masked_after(steps - 3, steps, masked0) as f64 / masked0 as f64;
+        assert!(
+            (tail(12) - 0.383).abs() < 0.01,
+            "steps=12 tail was {}",
+            tail(12)
+        );
+        assert!(
+            (tail(24) - 0.195).abs() < 0.01,
+            "steps=24 tail was {}",
+            tail(24)
+        );
+        assert!(tail(24) < tail(12), "more steps must soften the ending");
     }
 
     /// Per-channel argmax over these four heads, spelled out rather than
