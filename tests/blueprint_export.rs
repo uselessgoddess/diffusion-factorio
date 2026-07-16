@@ -195,17 +195,33 @@ fn icons_are_capped_at_four() {
     );
 }
 
-/// The footprint of the *vanilla prototype*, by the name we export — not by our
-/// own [`Entity::footprint`]. Deriving these from the world model would make the
-/// test below circular: it would prove the exporter agrees with us, when what
-/// matters is that it agrees with Factorio. These are the sizes the game
-/// actually enforces on import.
-fn prototype_size(name: &str) -> (f64, f64) {
-    match name {
+/// The footprint of the *vanilla prototype*, by the name and direction we
+/// export — not by our own [`Entity::footprint`]. Deriving these from the world
+/// model would make the test below circular: it would prove the exporter agrees
+/// with us, when what matters is that it agrees with Factorio. These are the
+/// sizes the game actually enforces on import.
+///
+/// Factorio rotates a footprint with the entity, so the direction is part of the
+/// question and not an ornament: a `splitter` is two tiles wide and one tall
+/// facing north or south, and one wide by two tall facing east or west. A square
+/// prototype is unaffected, which is why an `assembling-machine-1` may ignore its
+/// facing here.
+///
+/// This rule went untested until `SHARED_LINE` became the first family to place a
+/// splitter at all. The sweep below had swept a splitter exactly zero times, so a
+/// size table that could not rotate looked correct for as long as the vocabulary
+/// had a hole in it.
+fn prototype_size(name: &str, direction: Option<u8>) -> (f64, f64) {
+    let (w, h) = match name {
         "assembling-machine-1" => (3.0, 3.0),
         "splitter" => (2.0, 1.0),
         "transport-belt" | "underground-belt" | "inserter" | "constant-combinator" => (1.0, 1.0),
         other => panic!("unknown prototype {other}: give it a size before exporting it"),
+    };
+    // 4 is east and 12 is west, in the game's sixteenths-of-a-turn encoding.
+    match direction {
+        Some(4) | Some(12) => (h, w),
+        _ => (w, h),
     }
 }
 
@@ -218,7 +234,7 @@ fn collisions(grid: &Grid) -> Vec<(String, String)> {
         .entities
         .iter()
         .map(|e| {
-            let (w, h) = prototype_size(&e.name);
+            let (w, h) = prototype_size(&e.name, e.direction);
             let (x, y) = (e.position.x, e.position.y);
             (
                 e.name.clone(),
@@ -357,6 +373,43 @@ fn an_entity_is_centred_on_the_tiles_it_covers() {
     assert_eq!(machine.name, "assembling-machine-1");
     // Anchored at (0,0), covering tiles 0..3 on both axes: the centre is 1.5.
     assert_eq!((machine.position.x, machine.position.y), (1.5, 1.5));
+}
+
+/// The assembler above cannot catch a footprint that fails to rotate, because
+/// a 3×3 rotated is a 3×3. A splitter can: it is 2×1 lying north-south and 1×2
+/// facing east, so its centre moves when it turns. Everything that reads a
+/// blueprint — the game, and `prototype_size` in this file — has to turn with it.
+///
+/// Worth stating twice over because the export is the only artefact here that
+/// leaves the repo. A wrong centre is not a wrong number in a metric; it is a
+/// blueprint the player pastes and Factorio refuses.
+#[test]
+fn a_splitter_turns_its_footprint_when_it_turns() {
+    for (direction, centre) in [
+        // Lying north-south it covers tiles (0,0) and (1,0): two wide, one tall.
+        (Direction::North, (1.0, 0.5)),
+        // Facing east it covers (0,0) and (0,1) instead: one wide, two tall.
+        (Direction::East, (0.5, 1.0)),
+    ] {
+        let mut grid = Grid::new(4, 4);
+        grid.set(
+            0,
+            0,
+            Cell {
+                entity: Entity::Splitter,
+                direction,
+                ..Default::default()
+            },
+        );
+        let bp = grid_to_blueprint(&grid, "splitter centring").unwrap();
+        let splitter = &bp.blueprint.entities[0];
+        assert_eq!(splitter.name, "splitter");
+        assert_eq!(
+            (splitter.position.x, splitter.position.y),
+            centre,
+            "a splitter facing {direction:?} is centred wrong"
+        );
+    }
 }
 
 /// An inserter's exported `direction` must name the tile it **drops into**.

@@ -44,6 +44,10 @@ pub enum LessonKind {
     /// two-input craft, and the only family whose best answer is *unbalanced* —
     /// see [`gen_circuit_line`].
     CircuitLine,
+    /// **One** source, split by a splitter, feeding up to [`SHARED_LINES`]
+    /// machines. The only family that shares an input line, and the only one that
+    /// places a splitter at all — see [`gen_shared_line`].
+    SharedLine,
 }
 
 impl LessonKind {
@@ -56,6 +60,7 @@ impl LessonKind {
             LessonKind::UndergroundCross,
             LessonKind::AssemblerBank,
             LessonKind::CircuitLine,
+            LessonKind::SharedLine,
         ]
     }
     pub fn name(self) -> &'static str {
@@ -67,6 +72,7 @@ impl LessonKind {
             LessonKind::UndergroundCross => "UNDERGROUND_CROSS",
             LessonKind::AssemblerBank => "ASSEMBLER_BANK",
             LessonKind::CircuitLine => "CIRCUIT_LINE",
+            LessonKind::SharedLine => "SHARED_LINE",
         }
     }
 
@@ -88,6 +94,7 @@ impl LessonKind {
             LessonKind::UndergroundCross => 7,
             LessonKind::AssemblerBank => LINE_W.max(LINE_H * BANK_LINES),
             LessonKind::CircuitLine => CIRCUIT_W.max(CIRCUIT_H),
+            LessonKind::SharedLine => SHARED_W.max(SHARED_H),
         }
     }
 
@@ -101,7 +108,10 @@ impl LessonKind {
     /// that ranks factories has nothing to do on data like that, and neither
     /// does a policy gradient.
     pub fn is_ambiguous(self) -> bool {
-        matches!(self, LessonKind::AssemblerBank | LessonKind::CircuitLine)
+        matches!(
+            self,
+            LessonKind::AssemblerBank | LessonKind::CircuitLine | LessonKind::SharedLine
+        )
     }
 }
 
@@ -186,6 +196,7 @@ pub fn generate(kind: LessonKind, size: usize, seed: u64) -> Option<Sample> {
             LessonKind::UndergroundCross => gen_underground_cross(size, &mut rng),
             LessonKind::AssemblerBank => gen_assembler_bank(size, &mut rng),
             LessonKind::CircuitLine => gen_circuit_line(size, &mut rng),
+            LessonKind::SharedLine => gen_shared_line(size, &mut rng),
         };
         if let Some(sample) = built {
             debug_assert!(
@@ -1175,6 +1186,194 @@ fn gen_underground_cross(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
     })
 }
 
+/// Machines a [`LessonKind::SharedLine`] scaffold can feed from its one source.
+///
+/// Two, because a splitter has two outputs and this family is about the splitter.
+/// Feeding four would mean a tree of three splitters and a much taller scaffold;
+/// the concept — *one input line serves many machines* — is already the
+/// difference between one and two.
+pub const SHARED_LINES: usize = 2;
+
+/// Columns a [`LessonKind::SharedLine`] occupies: source, its belt, the splitter,
+/// the branch belt, the loading inserter, the machine's three, the unloading
+/// inserter, the output belt, the collector column.
+const SHARED_W: usize = 11;
+
+/// Rows it occupies: two machines three tall, one row apart.
+const SHARED_H: usize = 7;
+
+/// Up to [`SHARED_LINES`] machines fed from **one** source through a splitter:
+///
+/// ```text
+///   S  >  =  >  i  A  A  A  i  >  v
+///   .  .  =  v  .  A  A  A  .  .  v
+///   .  .  .  v  .  A  A  A  .  .  v
+///   .  .  .  v  .  .  .  .  .  .  v
+///   .  .  .  >  i  A  A  A  i  >  K
+///   .  .  .  .  .  A  A  A  .  .  .
+///   .  .  .  .  .  A  A  A  .  .  .
+/// ```
+///
+/// [`gen_assembler_bank`] gives each of its three machines a source of its own.
+/// No real factory looks like that — a real one runs **one** belt and divides it,
+/// because input lines are the scarce thing and machines are not. This family is
+/// that correction, and it is the only place in the curriculum where either half
+/// of the idea appears:
+///
+/// * **One source, many machines.** The bank's scaffold answers "how many
+///   machines" by counting the sources it was handed. Here the scaffold says
+///   nothing about the count, because there is one source whatever the answer is.
+/// * **A splitter.** `Entity::Splitter` has been in the vocabulary, the
+///   simulator, the SVG and the blueprint exporter from the start, and no lesson
+///   has ever placed one — `experiments/bus_tap` counts zero across every family.
+///   The model has had a word it was never shown a use for.
+///
+/// The ambiguity is [`gen_assembler_bank`]'s, kept deliberately: **how many of
+/// the two branches get built is up to the answer**, both branches deliver into
+/// the same sink, and two deliver twice what one does. So the family has more
+/// than one working answer and they are ordered — which is what gives
+/// [`crate::throughput`] and [`crate::best_of_n`] something to do.
+///
+/// A one-branch answer needs no splitter at all and the splitter's dead output
+/// costs nothing: [`crate::sim::flow_targets`] only names tiles something stands
+/// on, so an unbuilt branch is not a successor and the splitter does not divide
+/// its flow into the void.
+///
+/// Only single-input recipes fit, as in [`gen_assembler_line`]: there is one
+/// source, so there is one ingredient.
+fn gen_shared_line(size: usize, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    if size < SHARED_W || size < SHARED_H {
+        return None;
+    }
+    let x0 = rng.gen_range(0..=(size - SHARED_W));
+    let y0 = rng.gen_range(0..=(size - SHARED_H));
+    let recipe = *Item::single_input_craftable().choose(rng).unwrap();
+    let input_item = recipe.ingredients()[0].item;
+
+    // Branch `j` runs along `row(j)`: the top one shares the source's row, the
+    // bottom one sits four rows down so the 3×3 machines clear each other.
+    let row = |j: usize| y0 + 4 * j;
+    let machine = |j: usize| (x0 + 5, row(j));
+    let collector = x0 + SHARED_W - 1;
+    let sink = (collector, row(SHARED_LINES - 1));
+
+    let mut grid = Grid::new(size, size);
+    grid.set(
+        x0,
+        y0,
+        Cell {
+            entity: Entity::Source,
+            item: input_item,
+            ..Default::default()
+        },
+    );
+    grid.set(
+        sink.0,
+        sink.1,
+        Cell {
+            entity: Entity::Sink,
+            item: recipe,
+            ..Default::default()
+        },
+    );
+    let protected = vec![grid.idx(x0, y0), grid.idx(sink.0, sink.1)];
+
+    // As in the bank: mask the whole rectangle, not the cells this answer
+    // happened to fill. Observing an unbuilt branch as empty would spell the
+    // branch count out in the conditioning and the ambiguity would evaporate.
+    let mut removable = Vec::new();
+    for y in y0..y0 + SHARED_H {
+        for x in x0..x0 + SHARED_W {
+            let i = grid.idx(x, y);
+            if !protected.contains(&i) {
+                removable.push(i);
+            }
+        }
+    }
+
+    let branches = rng.gen_range(1..=SHARED_LINES);
+
+    // The head of the line: source, belt, and — only when the line is actually
+    // divided — the splitter. An east-facing splitter is 1×2, anchored on the
+    // source's row and reaching one row down, and each of its two tiles pushes
+    // east independently. That is the whole entity: one belt in, two belts out.
+    grid.set(x0 + 1, y0, Cell::belt(Direction::East));
+    if branches > 1 {
+        grid.set(
+            x0 + 2,
+            y0,
+            Cell {
+                entity: Entity::Splitter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        // The lower output turns down the branch column.
+        grid.set(x0 + 3, y0 + 1, Cell::belt(Direction::South));
+        for y in y0 + 2..row(1) {
+            grid.set(x0 + 3, y, Cell::belt(Direction::South));
+        }
+    } else {
+        grid.set(x0 + 2, y0, Cell::belt(Direction::East));
+    }
+
+    for j in 0..branches {
+        let y = row(j);
+        // Belt into the machine's loading inserter, machine, unloading inserter.
+        grid.set(x0 + 3, y, Cell::belt(Direction::East));
+        grid.set(
+            x0 + 4,
+            y,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        let (mx, my) = machine(j);
+        grid.set(
+            mx,
+            my,
+            Cell {
+                entity: Entity::Assembler,
+                direction: Direction::East,
+                item: recipe,
+                misc: Misc::None,
+            },
+        );
+        grid.set(
+            x0 + 8,
+            y,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        grid.set(x0 + 9, y, Cell::belt(Direction::East));
+    }
+    // One column collects every branch's output into the shared sink, which sits
+    // at the bottom branch's row: the bottom branch hands off to it directly, the
+    // top one belts down the column. The column is laid whatever the branch
+    // count, because a one-branch answer is only the top branch and would
+    // otherwise deliver into an empty tile — `item_reaches_sink` would reject it
+    // and `generate`'s retry loop would silently redraw until it got two, leaving
+    // a family that claims to be ambiguous and never once is.
+    for y in y0..sink.1 {
+        grid.set(collector, y, Cell::belt(Direction::South));
+    }
+
+    if !item_reaches_sink(&grid) {
+        return None;
+    }
+    Some(Sample {
+        kind: LessonKind::SharedLine,
+        solution: grid,
+        protected,
+        removable,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1275,7 +1474,10 @@ mod tests {
         assert!(LessonKind::all()
             .iter()
             .filter(|k| k.is_ambiguous())
-            .all(|k| matches!(k, LessonKind::AssemblerBank | LessonKind::CircuitLine)));
+            .all(|k| matches!(
+                k,
+                LessonKind::AssemblerBank | LessonKind::CircuitLine | LessonKind::SharedLine
+            )));
     }
 
     /// Ambiguity alone is not enough: if every answer delivered the same rate,
@@ -1701,5 +1903,151 @@ mod tests {
                 "cut the {starve:?} feed and it still delivered circuits"
             );
         }
+    }
+
+    /// Every scaffold the generator writes has to be buildable and has to
+    /// deliver, or the model is being trained on a lie. Same shape as
+    /// [`every_circuit_line_actually_delivers_circuits`], and worth repeating
+    /// here because this is the only family that places a splitter — an entity
+    /// whose footprint rotates (1x2 facing east, 2x1 facing north) and whose flow
+    /// divides, so there are two ways for it to be quietly wrong.
+    #[test]
+    fn every_shared_line_actually_delivers() {
+        let mut built = 0;
+        for seed in 0..200u64 {
+            let Some(sample) = generate(LessonKind::SharedLine, 11, seed) else {
+                continue;
+            };
+            built += 1;
+            assert!(
+                sample.solution.is_consistent(),
+                "seed {seed} is unbuildable"
+            );
+            assert!(
+                sample.solution.footprints_are_legal(),
+                "seed {seed} overlaps its own machines"
+            );
+            assert!(
+                item_reaches_sink(&sample.solution),
+                "seed {seed} does not deliver"
+            );
+            assert!(
+                throughput::score(&sample.solution) > 0.0,
+                "seed {seed} routes but delivers nothing"
+            );
+            assert_eq!(
+                sample
+                    .solution
+                    .cells
+                    .iter()
+                    .filter(|c| c.entity == Entity::Source)
+                    .count(),
+                1,
+                "seed {seed} has more than the one source that is the whole point"
+            );
+        }
+        assert_eq!(built, 200, "the generator failed on some seeds");
+    }
+
+    /// The point of the family, as a number rather than a claim in a doc comment:
+    /// **one** source feeds two machines through a splitter, and two machines
+    /// deliver twice what one does.
+    ///
+    /// [`gen_assembler_bank`] gets the same doubling by handing the answer a
+    /// second source. That is the thing this family exists to correct, so the
+    /// test asserts the source count too — if the doubling ever came from extra
+    /// input rather than from dividing the input there was, the lesson would have
+    /// silently become the bank again.
+    #[test]
+    fn one_source_split_two_ways_delivers_twice_what_one_branch_does() {
+        let mut by_recipe: HashMap<(u8, usize), f64> = HashMap::new();
+        for seed in 0..2_000u64 {
+            let Some(sample) = generate(LessonKind::SharedLine, 11, seed) else {
+                continue;
+            };
+            let branches = sample
+                .solution
+                .cells
+                .iter()
+                .filter(|c| c.entity == Entity::Assembler)
+                .count();
+            let recipe = sample
+                .solution
+                .cells
+                .iter()
+                .find(|c| c.entity == Entity::Sink)
+                .expect("always has a sink")
+                .item as u8;
+            let rate = throughput::score(&sample.solution);
+            if let Some(previous) = by_recipe.insert((recipe, branches), rate) {
+                assert!(
+                    (previous - rate).abs() < 1e-9,
+                    "{branches} branches of recipe {recipe} delivered {previous} and {rate}"
+                );
+            }
+            // A one-branch answer needs no splitter, and only a one-branch answer
+            // may go without: an unsplit line cannot reach the second machine.
+            let splitters = sample
+                .solution
+                .cells
+                .iter()
+                .filter(|c| c.entity == Entity::Splitter)
+                .count();
+            assert_eq!(
+                splitters,
+                usize::from(branches > 1),
+                "seed {seed} built {branches} branches off {splitters} splitters"
+            );
+        }
+
+        let recipes: HashSet<u8> = by_recipe.keys().map(|&(r, _)| r).collect();
+        assert_eq!(
+            recipes.len(),
+            Item::single_input_craftable().len(),
+            "not every recipe was drawn"
+        );
+        for recipe in recipes {
+            let (Some(&one), Some(&two)) =
+                (by_recipe.get(&(recipe, 1)), by_recipe.get(&(recipe, 2)))
+            else {
+                panic!("recipe {recipe} was never drawn at both branch counts");
+            };
+            assert!(
+                (two - one * 2.0).abs() < 1e-9,
+                "recipe {recipe}: splitting the line took {one}/s to {two}/s, not to {}/s",
+                one * 2.0
+            );
+        }
+    }
+
+    /// `Entity::Splitter` has been in the vocabulary, the simulator, the SVG
+    /// renderer and the blueprint exporter since the first commit, and until
+    /// [`gen_shared_line`] no lesson had ever placed one: `experiments/bus_tap`
+    /// counted zero across every family at 200 seeds each. The model had a word
+    /// it was never shown a use for, and a word never seen in training is a word
+    /// never drawn at inference.
+    ///
+    /// The test is here so that stays fixed. If someone deletes this family, the
+    /// vocabulary quietly develops a hole again and nothing else in the suite
+    /// would say so.
+    #[test]
+    fn some_lesson_teaches_every_entity_the_vocabulary_has() {
+        let mut seen: HashSet<u8> = HashSet::new();
+        for &kind in LessonKind::all() {
+            for seed in 0..50u64 {
+                let Some(sample) = generate(kind, 13, seed) else {
+                    continue;
+                };
+                seen.extend(sample.solution.cells.iter().map(|c| c.entity as u8));
+            }
+        }
+        let untaught: Vec<Entity> = (0..Entity::COUNT)
+            .filter_map(Entity::from_id)
+            .filter(|e| !seen.contains(&(*e as u8)))
+            .collect();
+        assert!(
+            untaught.is_empty(),
+            "no lesson ever places {untaught:?} -- the model cannot learn a word it never sees"
+        );
     }
 }
