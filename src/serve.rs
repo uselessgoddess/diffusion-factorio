@@ -155,6 +155,12 @@ pub struct DesignResponse {
     pub candidate_scores: Vec<f64>,
     /// Parts of every draw, in draw order, alongside `candidate_scores`.
     pub candidate_parts: Vec<usize>,
+    /// Whether each draw could be built, in draw order. A draw that could not
+    /// scores `0.0` above, and this is what separates the two ways a draw earns
+    /// that zero: one is a factory that does not work, the other is not a
+    /// factory. Only the second is the model failing at layout rather than at
+    /// routing, and they want fixing in different places.
+    pub candidate_buildable: Vec<bool>,
     /// Parts the winner is built from.
     pub parts: usize,
     /// Parts the compactness tiebreak saved against the roomiest draw that
@@ -329,7 +335,11 @@ pub fn design<B: Backend>(
         svg: grid_to_svg(&grid),
         frames: frames(&grid, &run.best.reveal_step),
         ascii: textual::render(&grid),
-        score: report.score,
+        // The winner's usable score, not `report.score`, so the verdict cannot
+        // contradict the blueprint box underneath it. They are the same number
+        // unless nothing drawn could be built, and then a raw rate here would be
+        // reporting items/s from a factory the next line refuses to export.
+        score: best_of_n::usable_score(&grid),
         functional: sim::item_reaches_sink(&grid),
         deliveries: report
             .deliveries
@@ -345,6 +355,7 @@ pub fn design<B: Backend>(
         parts_saved,
         candidate_scores: run.scores,
         candidate_parts: run.parts,
+        candidate_buildable: run.buildable,
         distinct: run.distinct,
         blueprint,
         blueprint_error,
