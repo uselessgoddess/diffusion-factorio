@@ -92,9 +92,13 @@ pub fn power_mean(values: &[f64], p: f64) -> f64 {
 /// Fold per-sink rates into a single score.
 ///
 /// Every sink is in the denominator whether or not it is fed, so an ignored
-/// sink drags the score down rather than being quietly dropped. A non-finite
-/// mean (a source feeding a sink directly, with nothing built in between)
-/// collapses to 0 rather than winning.
+/// sink drags the score down rather than being quietly dropped.
+///
+/// [`throughput`] hands this finite rates by construction — a sink offered an
+/// unbounded supply is one nothing was built to feed, and is reported at the 0
+/// it delivers. The non-finite guard is the backstop for anyone folding rates
+/// from elsewhere: an `inf` here would win every ranking it entered, and
+/// `serde_json` would write it out as `null`.
 pub fn factory_score(deliveries: &[SinkDelivery]) -> f64 {
     let achieved: Vec<f64> = deliveries.iter().map(|d| d.achieved).collect();
     let score = power_mean(&achieved, FACTORY_SCORE_P);
@@ -174,22 +178,38 @@ pub fn throughput(grid: &Grid) -> ThroughputReport {
         }
     }
 
-    let deliveries: Vec<SinkDelivery> = sinks
+    let arriving: Vec<f64> = sinks
         .iter()
         .map(|&s| {
             let filter = grid.cells[s].item;
             // Only what the sink is configured for counts. Without this a policy
             // could belt raw plates into a gear sink and score full marks for
             // never building the machine.
-            let achieved = (0..Item::COUNT)
+            (0..Item::COUNT)
                 .filter(|&i| sink_accepts(filter, Item::from_id(i).expect("in range")))
                 .map(|i| outputs[s][i])
-                .sum();
-            SinkDelivery {
-                at: (s % grid.width, s / grid.width),
-                item: filter,
-                achieved,
-            }
+                .sum()
+        })
+        .collect();
+
+    // A sink with a source pressed straight against it is offered an unbounded
+    // supply: a source is an unlimited well, [`intake_cap`] says a sink is never
+    // the constraint, and nothing was built in between to be one instead. It is
+    // the only arrangement that can reach a sink unbounded — a belt, an inserter,
+    // a splitter and an assembler all cap what they pass on. No factory delivers
+    // infinitely fast; this one was never built, so it delivers nothing.
+    //
+    // Reporting the `inf` instead was a crash waiting for its first hand-painted
+    // task: `serde_json` writes a non-finite float as `null`, and the viewer
+    // called `.toFixed` on it. The lessons are generated already-working and
+    // never press the two together, so only a model's own garbage found it.
+    let deliveries: Vec<SinkDelivery> = sinks
+        .iter()
+        .zip(&arriving)
+        .map(|(&s, &achieved)| SinkDelivery {
+            at: (s % grid.width, s / grid.width),
+            item: grid.cells[s].item,
+            achieved: if achieved.is_finite() { achieved } else { 0.0 },
         })
         .collect();
 
@@ -516,6 +536,55 @@ mod tests {
         g.set(3, 0, Cell::belt(Direction::East));
         g.set(4, 0, anchor(Entity::Sink, Item::IronPlate));
         assert!(approx(score(&g), BELT_RATE));
+    }
+
+    /// The viewer POSTed a hand-painted task, the untrained model dropped a sink
+    /// next to the source, and the page died on `null.toFixed`. A source is an
+    /// unlimited supply and a sink is never the constraint, so with nothing built
+    /// in between the arriving rate is literally `inf` — which `serde_json`
+    /// writes as `null`. The score already read that as 0; the per-sink number it
+    /// was folded from was shipped raw.
+    #[test]
+    fn a_sink_pressed_against_a_source_reports_a_finite_rate() {
+        let mut g = Grid::new(2, 1);
+        g.set(0, 0, anchor(Entity::Source, Item::IronPlate));
+        g.set(1, 0, anchor(Entity::Sink, Item::IronPlate));
+        let report = throughput(&g);
+        assert!(
+            report.deliveries.iter().all(|d| d.achieved.is_finite()),
+            "a non-finite rate serialises as JSON null: {:?}",
+            report.deliveries
+        );
+        assert_eq!(report.deliveries[0].achieved, 0.0);
+        assert_eq!(report.score, 0.0);
+    }
+
+    /// The report has to be readable from both sides: fold the rates it prints
+    /// and you must land on the score it prints. An earlier draft of the fix
+    /// zeroed the *rate* a sink was offered but scored the `inf` it arrived at,
+    /// so a factory could show 15/s to one sink and still claim 0 overall.
+    #[test]
+    fn the_score_is_the_fold_of_the_rates_the_report_prints() {
+        // One sink fed a full belt; one with the source bolted onto it.
+        let mut g = Grid::new(5, 2);
+        g.set(0, 0, anchor(Entity::Source, Item::IronPlate));
+        g.set(1, 0, Cell::belt(Direction::East));
+        g.set(2, 0, Cell::belt(Direction::East));
+        g.set(3, 0, Cell::belt(Direction::East));
+        g.set(4, 0, anchor(Entity::Sink, Item::IronPlate));
+        g.set(0, 1, anchor(Entity::Source, Item::CopperPlate));
+        g.set(1, 1, anchor(Entity::Sink, Item::CopperPlate));
+
+        let report = throughput(&g);
+        let rates: Vec<f64> = report.deliveries.iter().map(|d| d.achieved).collect();
+        assert!(approx(report.score, power_mean(&rates, FACTORY_SCORE_P)));
+
+        // The belted sink keeps the rate it earned; only the unbuilt one is 0.
+        // Pressing a sink against a source buys exactly what building nothing
+        // buys, which is what stops it winning — it no longer has to condemn the
+        // half of the grid that *was* built to do that.
+        assert!(approx(rates[0], BELT_RATE), "belted sink: {:?}", rates);
+        assert_eq!(rates[1], 0.0);
     }
 
     #[test]

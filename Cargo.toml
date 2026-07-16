@@ -59,3 +59,7 @@ path = "experiments/why_zero.rs"
 [[example]]
 name = "bus_tap"
 path = "experiments/bus_tap.rs"
+
+[[example]]
+name = "unbounded_sink"
+path = "experiments/unbounded_sink.rs"
