@@ -103,6 +103,10 @@ pub struct TaskSpec {
     pub temperature: f64,
     #[serde(default)]
     pub seed: u64,
+    /// Among draws that deliver the same items/second, keep the one built from
+    /// the fewest parts. Never trades throughput away for a smaller answer.
+    #[serde(default = "default_prefer_compact")]
+    pub prefer_compact: bool,
 }
 
 fn default_candidates() -> usize {
@@ -113,6 +117,9 @@ fn default_steps() -> usize {
 }
 fn default_temperature() -> f64 {
     0.9
+}
+fn default_prefer_compact() -> bool {
+    true
 }
 
 /// What one sink got, flattened for the page.
@@ -146,6 +153,13 @@ pub struct DesignResponse {
     /// Score of every draw, in draw order, so the page can show what best-of-N
     /// rejected and whether the spread is real.
     pub candidate_scores: Vec<f64>,
+    /// Parts of every draw, in draw order, alongside `candidate_scores`.
+    pub candidate_parts: Vec<usize>,
+    /// Parts the winner is built from.
+    pub parts: usize,
+    /// Parts the compactness tiebreak saved against the roomiest draw that
+    /// delivers just as much. `0` when no two draws tied on throughput.
+    pub parts_saved: usize,
     /// Distinct grids among the draws. `1` means the model had one idea.
     pub distinct: usize,
     /// Importable into Factorio, or the reason it is not.
@@ -293,9 +307,11 @@ pub fn design<B: Backend>(
             temperature: spec.temperature.max(0.0),
             seed: spec.seed,
         },
+        prefer_compact: spec.prefer_compact,
     };
     let mut runs = best_of_n::best_of_n(model, &[partial], &[observed], &cfg, device);
     let run = runs.pop().expect("one task in, one result out");
+    let (parts, parts_saved) = (run.best_parts(), run.parts_saved());
     let grid = run.best.grid;
 
     let report = throughput::throughput(&grid);
@@ -325,7 +341,10 @@ pub fn design<B: Backend>(
                 achieved: d.achieved,
             })
             .collect(),
+        parts,
+        parts_saved,
         candidate_scores: run.scores,
+        candidate_parts: run.parts,
         distinct: run.distinct,
         blueprint,
         blueprint_error,
@@ -514,6 +533,7 @@ mod tests {
             steps: 8,
             temperature: 0.9,
             seed: 0,
+            prefer_compact: true,
         }
     }
 

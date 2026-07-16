@@ -34,6 +34,14 @@ pub struct BestOfNConfig {
     /// Base sampler settings. `temperature` must be above zero or every draw is
     /// the same greedy argmax; `seed` is a base — draw `i` runs at `seed + i`.
     pub sample: SampleConfig,
+    /// Break throughput ties by preferring the factory that uses fewer parts.
+    ///
+    /// The issue asks for a model "награждалась за компактность" — rewarded for
+    /// compactness. Compactness cannot be an objective of its own: the most
+    /// compact factory is the empty one, and it delivers nothing. So it never
+    /// outranks throughput here, it only chooses among the candidates that
+    /// already tie on it. See [`parts`] for what is counted.
+    pub prefer_compact: bool,
 }
 
 impl Default for BestOfNConfig {
@@ -44,8 +52,36 @@ impl Default for BestOfNConfig {
                 temperature: 1.0,
                 ..Default::default()
             },
+            prefer_compact: true,
         }
     }
+}
+
+/// How many parts a factory is built from: one per entity the grid holds.
+///
+/// Footprints are implied rather than stored — only an entity's anchor is a
+/// cell — so this counts a 3×3 assembler once, as the one machine it is, and
+/// not nine times. Two candidates for the same task need the same machines and
+/// the same source and sink, so what this actually ranks is the belt and
+/// inserter run between them: the part of the factory the model chose.
+///
+/// Obstacles are terrain rather than anything the model built, and they live on
+/// their own plane, so they are never counted.
+pub fn parts(grid: &Grid) -> usize {
+    grid.cells.iter().filter(|c| !c.is_empty()).count()
+}
+
+/// Does a draw scoring `score` from `count` parts beat the best so far?
+///
+/// Throughput first, and compactness only among draws that already tie on it,
+/// so a leaner factory that delivers less always loses. The `best > 0.0` is what
+/// keeps the empty factory from winning: with every candidate at 0.0 the
+/// emptiest is the most compact, and rewarding it would be rewarding the model
+/// for giving up. When nothing delivers, the first draw stands and the caller
+/// can read the whole slate off `BestOfN::scores`.
+fn beats(score: f64, count: usize, best: f64, best_parts: usize, prefer_compact: bool) -> bool {
+    let tied = score == best && best > 0.0;
+    score > best || (prefer_compact && tied && count < best_parts)
 }
 
 /// What Best-of-N produced for one task.
@@ -55,6 +91,8 @@ pub struct BestOfN {
     pub best: ReconstructionDiagnostics,
     /// Simulator score of every draw, in draw order.
     pub scores: Vec<f64>,
+    /// [`parts`] of every draw, in draw order.
+    pub parts: Vec<usize>,
     /// Distinct grids among the draws.
     pub distinct: usize,
 }
@@ -78,6 +116,26 @@ impl BestOfN {
     pub fn gain(&self) -> f64 {
         self.best_score() - self.first_score()
     }
+
+    /// Parts the winner is built from.
+    pub fn best_parts(&self) -> usize {
+        parts(&self.best.grid)
+    }
+
+    /// Parts saved against the roomiest draw that delivers just as much.
+    ///
+    /// Zero when no two draws tie on throughput, which is the honest reading
+    /// most of the time: the tiebreak can only pay out when there is a tie.
+    pub fn parts_saved(&self) -> usize {
+        let best = self.best_score();
+        let tied = self
+            .scores
+            .iter()
+            .zip(&self.parts)
+            .filter(|(&score, _)| score == best)
+            .map(|(_, &parts)| parts);
+        tied.max().unwrap_or(0) - self.best_parts()
+    }
 }
 
 /// Draw `cfg.n` candidates per task, score each with the simulator, and keep the
@@ -98,7 +156,9 @@ pub fn best_of_n<B: Backend>(
 
     let mut best: Vec<Option<ReconstructionDiagnostics>> = (0..tasks).map(|_| None).collect();
     let mut best_score = vec![f64::NEG_INFINITY; tasks];
+    let mut best_parts = vec![usize::MAX; tasks];
     let mut scores: Vec<Vec<f64>> = (0..tasks).map(|_| Vec::with_capacity(draws)).collect();
+    let mut part_counts: Vec<Vec<usize>> = (0..tasks).map(|_| Vec::with_capacity(draws)).collect();
     let mut seen: Vec<HashSet<u64>> = (0..tasks).map(|_| HashSet::new()).collect();
 
     // One batched pass per draw, rather than a single batch of `n * tasks`: the
@@ -111,10 +171,20 @@ pub fn best_of_n<B: Backend>(
         let candidates = reconstruct_with_diagnostics(model, partials, observed, &round, device);
         for (task, candidate) in candidates.into_iter().enumerate() {
             let score = throughput::score(&candidate.grid);
+            let count = parts(&candidate.grid);
             seen[task].insert(digest(&candidate.grid));
             scores[task].push(score);
-            if score > best_score[task] {
+            part_counts[task].push(count);
+
+            if beats(
+                score,
+                count,
+                best_score[task],
+                best_parts[task],
+                cfg.prefer_compact,
+            ) {
                 best_score[task] = score;
+                best_parts[task] = count;
                 best[task] = Some(candidate);
             }
         }
@@ -122,10 +192,12 @@ pub fn best_of_n<B: Backend>(
 
     best.into_iter()
         .zip(scores)
+        .zip(part_counts)
         .zip(seen)
-        .map(|((best, scores), seen)| BestOfN {
+        .map(|(((best, scores), parts), seen)| BestOfN {
             best: best.expect("every task gets at least one draw"),
             scores,
+            parts,
             distinct: seen.len(),
         })
         .collect()
@@ -154,6 +226,7 @@ mod tests {
     use crate::factory_gen::{generate, LessonKind};
     use crate::model::DenoiserConfig;
     use crate::sample::reconstruct;
+    use crate::world::{Cell, Direction, Entity, Item};
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -196,6 +269,7 @@ mod tests {
                     temperature: 1.0,
                     seed: 5,
                 },
+                ..Default::default()
             },
             &Default::default(),
         );
@@ -225,6 +299,7 @@ mod tests {
                 temperature: 1.2,
                 seed: 21,
             },
+            ..Default::default()
         };
         let picks = best_of_n(&model, &partials, &observed, &cfg, &Default::default());
 
@@ -263,6 +338,7 @@ mod tests {
                     temperature: 1.0,
                     seed: 3,
                 },
+                ..Default::default()
             },
             &Default::default(),
         );
@@ -295,6 +371,7 @@ mod tests {
             &BestOfNConfig {
                 n: 1,
                 sample: sample.clone(),
+                ..Default::default()
             },
             &Default::default(),
         );
@@ -325,6 +402,7 @@ mod tests {
                         temperature,
                         seed: 4,
                     },
+                    ..Default::default()
                 },
                 &Default::default(),
             )
@@ -334,5 +412,142 @@ mod tests {
         assert!(draw(0.0).iter().all(|p| p.distinct == 1));
         // Hot: the model is untrained, so every draw should land somewhere new.
         assert!(draw(1.5).iter().all(|p| p.distinct > 1));
+    }
+
+    /// Two factories that deliver the same items/second, one built from fewer
+    /// parts. This is the whole of what "rewarded for compactness" can safely
+    /// mean here, so it is worth stating on layouts we control rather than on
+    /// whatever an untrained model happens to draw.
+    ///
+    /// A belt run of any length carries a full belt, so the short way and the
+    /// long way around score identically and only the part count separates them.
+    fn anchor(entity: Entity, item: Item) -> Cell {
+        Cell {
+            entity,
+            item,
+            ..Default::default()
+        }
+    }
+
+    fn detour(long: bool) -> Grid {
+        //     S > > > K        or        S > > > K
+        //     . . . . .                  . ^ . . ^
+        //     . . . . .                  . < < < <
+        let mut g = Grid::new(5, 3);
+        g.set(0, 0, anchor(Entity::Source, Item::IronPlate));
+        g.set(4, 0, anchor(Entity::Sink, Item::IronPlate));
+        if long {
+            g.set(1, 0, Cell::belt(Direction::South));
+            for x in 1..4 {
+                g.set(x, 2, Cell::belt(Direction::East));
+            }
+            g.set(1, 1, Cell::belt(Direction::South));
+            g.set(4, 2, Cell::belt(Direction::North));
+            g.set(4, 1, Cell::belt(Direction::North));
+        } else {
+            for x in 1..4 {
+                g.set(x, 0, Cell::belt(Direction::East));
+            }
+        }
+        g
+    }
+
+    #[test]
+    fn the_long_way_round_and_the_short_way_deliver_the_same() {
+        assert_eq!(
+            throughput::score(&detour(false)),
+            throughput::score(&detour(true))
+        );
+        assert!(throughput::score(&detour(false)) > 0.0);
+        assert!(parts(&detour(true)) > parts(&detour(false)));
+    }
+
+    /// The trap in rewarding compactness: the most compact factory of all is the
+    /// empty one. It must never win, however many parts it saves — so the
+    /// tiebreak only ever runs among candidates that already deliver.
+    #[test]
+    fn an_empty_factory_never_wins_on_being_compact() {
+        let empty = Grid::new(5, 3);
+        assert_eq!(parts(&empty), 0);
+        assert_eq!(throughput::score(&empty), 0.0);
+        // Nothing is more compact, and nothing is worth less.
+        assert!(parts(&empty) < parts(&detour(false)));
+        assert!(throughput::score(&empty) < throughput::score(&detour(false)));
+
+        // Scored in draw order, the empty grid arrives first and still loses.
+        let scores = [0.0, throughput::score(&detour(false))];
+        let counts = [parts(&empty), parts(&detour(false))];
+        assert_eq!(pick_index(&scores, &counts, true), 1);
+    }
+
+    /// Which draw wins, run through the same [`beats`] the draw loop uses, so
+    /// this cannot drift from what `best_of_n` actually does.
+    fn pick_index(scores: &[f64], parts: &[usize], prefer_compact: bool) -> usize {
+        let (mut best, mut best_score, mut best_parts) = (0, f64::NEG_INFINITY, usize::MAX);
+        for (i, (&score, &count)) in scores.iter().zip(parts).enumerate() {
+            if beats(score, count, best_score, best_parts, prefer_compact) {
+                best = i;
+                best_score = score;
+                best_parts = count;
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn a_tie_on_throughput_goes_to_the_factory_with_fewer_parts() {
+        let scores = [
+            throughput::score(&detour(true)),
+            throughput::score(&detour(false)),
+        ];
+        let counts = [parts(&detour(true)), parts(&detour(false))];
+
+        // The roomy detour is drawn first and is beaten by the lean one behind it.
+        assert_eq!(pick_index(&scores, &counts, true), 1);
+        // Switched off, the first of the tied draws stands: this is the choice
+        // the flag makes, not something the scores were going to decide anyway.
+        assert_eq!(pick_index(&scores, &counts, false), 0);
+    }
+
+    /// Compactness is a tiebreak, never a trade: a leaner factory that delivers
+    /// less must lose, or the flag would be quietly costing throughput.
+    #[test]
+    fn compactness_never_outranks_throughput() {
+        let scores = [15.0, 0.86];
+        let counts = [12, 3];
+        assert_eq!(pick_index(&scores, &counts, true), 0);
+    }
+
+    #[test]
+    fn the_compactness_tiebreak_reports_the_parts_it_saved() {
+        let (model, partials, observed) = fixture(3);
+        let picks = best_of_n(
+            &model,
+            &partials,
+            &observed,
+            &BestOfNConfig {
+                n: 6,
+                sample: SampleConfig {
+                    steps: 4,
+                    temperature: 1.0,
+                    seed: 5,
+                },
+                prefer_compact: true,
+            },
+            &Default::default(),
+        );
+
+        for pick in &picks {
+            assert_eq!(pick.parts.len(), pick.scores.len());
+            assert_eq!(pick.best_parts(), parts(&pick.best.grid));
+            // The winner is the leanest of everything that tied with it, so it
+            // can never be beaten on parts by another draw at the same score.
+            let best = pick.best_score();
+            for (&score, &count) in pick.scores.iter().zip(&pick.parts) {
+                if score == best && best > 0.0 {
+                    assert!(pick.best_parts() <= count);
+                }
+            }
+        }
     }
 }

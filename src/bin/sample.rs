@@ -110,6 +110,7 @@ fn main() -> anyhow::Result<()> {
             &BestOfNConfig {
                 n: args.best_of,
                 sample: cfg.clone(),
+                ..Default::default()
             },
             &device,
         )
