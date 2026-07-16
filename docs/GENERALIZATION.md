@@ -30,8 +30,11 @@ the model's weights:
    visible. Fixed — `4b23104`.
 4. **A machine with no recipe was a legal cell**, so a dead factory scored
    `consistent=1.0`. Fixed — `03e3341`.
-5. **The curriculum is square-only** and the issue infers on 13×9. Not fixed;
-   measured below, and it is the one that needs a real decision.
+5. **The curriculum was square-only** and the issue infers on 13×9 — so two of
+   the eight lesson families, the only two that compose several machines into one
+   factory, could never be shown there. Fixed by generating each lesson natively
+   at `width` × `height` rather than padding a square; the decision, and what it
+   was weighed against, is [below](#what-was-done-about-it-native-width-height-not-padding).
 
 Faults 1 and 4 are both visible in the issue's own two examples, and fault 5 is
 the reason the issue's framing — «независимо от места на grid» — is the right
@@ -239,7 +242,7 @@ spend; leave `temperature` alone unless `distinct` is near 1 (raise it) or the
 draws are incoherent (lower it). None of these fix a task the model cannot do —
 they are worth a few points of buildability, not a new capability.
 
-## Root cause 5: the model has never seen the canvas it was asked about
+## Root cause 5: the model had never seen the canvas it was asked about
 
 This is the issue's own framing, and it is measurable:
 
@@ -247,9 +250,10 @@ This is the issue's own framing, and it is measurable:
 > нужно пластины железные в сборщик любой ценой запихнуть и как-то уместить,
 > **независимо от места на grid**.
 
-Every lesson in `factory_gen` builds on `Grid::new(size, size)`. **A square
-canvas is the only shape the model has ever been shown.** The issue trained on
-11×11 and inferred on 13×9.
+Every lesson in `factory_gen` built on `Grid::new(size, size)`. **A square canvas
+was the only shape the model had ever been shown.** The issue trained on 11×11
+and inferred on 13×9. (The numbers in this section are from before the fix; the
+decision they drove is at the end.)
 
 `model::tests::one_set_of_weights_runs_at_any_grid_size` proves the weights *run*
 at any size — the denoiser is fully convolutional, so nothing throws. It does not
@@ -284,18 +288,84 @@ weights, because if it holds there, **it means most of the issue's inference run
 were posed on a distribution the model was never trained on**, and no amount of
 `steps` or `candidates` repairs that.
 
-### What to do about it
+### What was done about it: native `(width, height)`, not padding
 
-Padding a square lesson into a rectangular canvas at a random offset is the cheap
-version: valid targets, no generator rewrite, and it teaches "the canvas shape is
-not the task" plus translation diversity. It does *not* teach the model to route
-through the extra space.
+The question the issue asks directly:
 
-The honest version is to thread `(width, height)` through `factory_gen` instead of
-one `size`, and sample a shape per batch (a batch must share a tensor shape, so
-per-batch is the granularity). That touches every generator and their
-`random_cell`/`neighbours`/`step` helpers. It is the change this issue actually
-argues for, and it is worth doing properly rather than approximating.
+> Нужно решить что в нашем случае будет иметь лучший эффект, дешёвые паддинги или
+> генерацию с учётом width/height.
+
+Two candidates. **Padding**: keep generating squares, drop each into the rectangle
+at a random offset, leave the rest empty — nothing in `factory_gen` changes.
+**Native**: hand every generator a `Canvas { width, height }` and let it use both
+— every generator changes.
+
+The choice is decided by the curriculum alone, so it can be measured before a
+single training step is paid for. `experiments/canvas_curriculum.rs` needs no
+checkpoint:
+
+```
+      canvas  padded  native  lost to padding
+        11x11   8/8     8/8    -                          trained shape
+         13x9   6/8     8/8    CIRCUIT_LINE, SHARED_LINE  the issue's shape
+         9x13   6/8     6/8    -                          the same, turned
+          9x9   6/8     6/8    -                          pool floor
+        15x15   8/8     8/8    -                          pool ceiling
+         15x9   6/8     8/8    CIRCUIT_LINE, SHARED_LINE  widest gap
+```
+
+**Native generation, for three reasons, one of them decisive.**
+
+1. **Padding cannot show the lessons that matter.** A square of side `s` padded
+   into `w`×`h` needs `s ≤ min(w, h)`, so the short side binds: on 13×9 the widest
+   square available is 9×9. `CIRCUIT_LINE` is 11×5 and `SHARED_LINE` is 11×7 —
+   both wider than they are tall, both fitting 13×9 natively with room over, and
+   both dropped by padding. They are the only chain and the only splitter in the
+   curriculum: the two families that compose several machines into one factory,
+   which is precisely what "invent new solutions" rests on. This is a fact about
+   arithmetic, not about a checkpoint, which is why it decides the question.
+2. **The pad region is a free giveaway.** It is provably empty in every label, so
+   what the model learns from it is "the answer lives inside a square sub-region"
+   — the opposite of the requested `независимо от места на grid`. On 13×9 that is
+   31% of the canvas; on 15×9, 40%.
+3. **Native costs almost nothing to run.** ~45–50k samples/s per canvas
+   (§3 of the same experiment), on the CPU, while the backward pass is the run's
+   clock. The write cost was real — every generator plus `random_cell`/`step`/
+   `neighbours` — but it is paid once, and any future canvas shape is now a config
+   change rather than another decision.
+
+What shipped:
+
+- `factory_gen::Canvas { width, height }` replaces the single `size`, and
+  `LessonKind::min_canvas` states each family's two sides separately instead of
+  collapsing them to the larger. That collapse was itself part of the bug: a
+  circuit line is 11×5 and was billed as needing 11 *rows* it never touches.
+- `TrainConfig::canvases: Vec<Canvas>` replaces `grid_size`, defaulting to
+  `Canvas::pool(9, 15)` — every width × height in that range. One shape is drawn
+  per *batch*, because `GridBatch` is one tensor and asserts against a ragged
+  batch; across a run the shape still varies, which is the axis that matters. The
+  floor is 9 because `ASSEMBLER_BANK` is 9 rows tall; the ceiling is 15 because the
+  default `ResBlock` tower sees `2 * blocks + 1 = 13` cells and past that the far
+  corners are joined only by pooled global context.
+- `train --size 11` still trains the old square-only curriculum. It is kept as the
+  control, not as an option worth using.
+
+Pinned by `factory_gen::tests::padding_squares_would_drop_the_two_lessons_that_compose`
+and `train::tests::the_default_curriculum_teaches_every_family_on_the_inference_canvas`.
+
+**What this does not settle.** The coverage argument proves a square curriculum
+*cannot show* two of eight families on 13×9. Whether the shape-mixed pool makes
+the model *build better factories* there is a question about weights, and only a
+run answers it. The `curriculum` job in `.github/workflows/ci.yml`
+(`workflow_dispatch`) trains both arms identically apart from the curriculum and
+scores each with `experiments/grid_shape.rs`; read the 13×9 row.
+
+**The known limit, deliberately not fixed here.** Every family is templated in one
+orientation, so an 11-wide lesson does not fit a 9-wide canvas however tall it is —
+which is why native scores 6/8 on 9×13 as well, and the honest reading of that row
+is that native does not help there. Rotating the templates would buy it back and is
+the obvious next lesson-side move. It is not what 13×9 needs, and padding does not
+buy it either.
 
 ## What the reference repo achieved, and at what cost
 
@@ -358,5 +428,9 @@ prerequisite, and now it is done.
 
 Nothing here required the model to be smarter. Four of five faults were fixed by
 reading the code and the issue's own blueprint strings, and each one is now a
-test that fails without the fix. The fifth — the square-only curriculum — is the
-one that needs a decision, and the one the issue was right about from the start.
+test that fails without the fix. The fifth — the square-only curriculum — was the
+one the issue was right about from the start, and it is the only one that was a
+decision rather than a bug: padding was cheaper to write and would have quietly
+dropped the two families the whole request depends on, so the lessons are now
+generated natively at width × height. The coverage argument is settled in the
+suite; whether it moves the weights is the `curriculum` CI job's answer to give.

@@ -385,6 +385,10 @@ What is *not* proven, and what I would measure before building any mod:
    already free and nobody has measured them**. `--size` exists on all three
    binaries. **Train at 11, sample at 15 — that experiment costs one command and
    has never been run.** Do it before designing a UI around arbitrary areas.
+   *(Since answered: `experiments/grid_shape` ran it, the trained shape scored
+   6.5× the issue's shape at matched area, and the curriculum now draws every
+   width × height in 9..=15 rather than one square — see cause 5 in
+   `docs/GENERALIZATION.md`. `--size` on `train` is now the square-only control.)*
 2. **The receptive field is a hard limit and it is computable.** ±1 at the stem,
    ±2 per block; at `--blocks 6` a cell sees ±13 — a 27×27 window. Beyond that,
    routing depends entirely on the mean-pooled global vector, and **mean-pooling
