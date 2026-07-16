@@ -71,3 +71,7 @@ path = "experiments/reveal_schedule.rs"
 [[example]]
 name = "sampling_defaults"
 path = "experiments/sampling_defaults.rs"
+
+[[example]]
+name = "grid_shape"
+path = "experiments/grid_shape.rs"
