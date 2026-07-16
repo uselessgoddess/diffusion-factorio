@@ -9,9 +9,15 @@
 //!
 //! `model::tests::one_set_of_weights_runs_at_any_grid_size` proves the weights
 //! *run* at any size — the denoiser is fully convolutional, so nothing throws.
-//! It does not prove they *work*, and those are different claims. Every lesson
-//! in `factory_gen` builds on `Grid::new(size, size)`, so a square canvas is the
-//! only shape the model has ever been shown.
+//! It does not prove they *work*, and those are different claims.
+//!
+//! This is what that gap looks like from the outside, and it is also the meter
+//! that decides whether closing it worked. Every lesson used to build on
+//! `Grid::new(size, size)`, so a square was the only shape the model had ever
+//! been shown — the state the issue's run was in. The curriculum now draws from
+//! `Canvas::pool(9, 15)` instead, and `train --size 11` keeps the old square-only
+//! behaviour as the control. Point this example at one checkpoint of each and
+//! read the 13x9 row: that is the comparison the `curriculum` CI job runs.
 //!
 //! The confound to avoid: a wider canvas usually means a longer route, and a
 //! longer route is harder for reasons that have nothing to do with shape. So the
