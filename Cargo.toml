@@ -77,5 +77,9 @@ name = "grid_shape"
 path = "experiments/grid_shape.rs"
 
 [[example]]
+name = "canvas_curriculum"
+path = "experiments/canvas_curriculum.rs"
+
+[[example]]
 name = "issue_examples"
 path = "experiments/issue_examples.rs"

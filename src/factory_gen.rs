@@ -2151,4 +2151,69 @@ mod tests {
             "no lesson ever places {untaught:?} -- the model cannot learn a word it never sees"
         );
     }
+
+    /// The canvas the issue actually runs inference on.
+    const INFERENCE: Canvas = Canvas::new(13, 9);
+
+    /// The measurement behind [`Canvas`]'s decision, as an assertion.
+    ///
+    /// Padding a square lesson of side `s` into `w`×`h` needs `s <= min(w, h)`,
+    /// so the widest square 13×9 admits is 9×9 — and both compositional families
+    /// are wider than they are tall. Native generation asks each side separately
+    /// and both fit with room over. This is the whole argument for paying for
+    /// two-sided generation, so if someone collapses `min_canvas` back to one
+    /// number this says which lessons it costs.
+    #[test]
+    fn padding_squares_would_drop_the_two_lessons_that_compose() {
+        for kind in [LessonKind::CircuitLine, LessonKind::SharedLine] {
+            let need = kind.min_canvas();
+            assert!(
+                kind.fits(INFERENCE),
+                "{} needs {need} and does not fit {INFERENCE} natively",
+                kind.name()
+            );
+            let largest_padded_square = Canvas::square(INFERENCE.width.min(INFERENCE.height));
+            assert!(
+                !kind.fits(largest_padded_square),
+                "{} fits {largest_padded_square}, so padding would not have cost it \
+                 -- this test no longer measures anything",
+                kind.name()
+            );
+        }
+    }
+
+    /// Every family is buildable on the inference canvas, not merely admitted by
+    /// [`LessonKind::fits`]. `fits` is a cheap arithmetic gate; the generators are
+    /// generate-and-verify and can still come back empty, which would leave a
+    /// lesson silently absent from a curriculum that thinks it teaches it.
+    #[test]
+    fn every_lesson_actually_generates_on_the_inference_canvas() {
+        for &kind in LessonKind::all() {
+            let built = (0..50u64)
+                .filter(|&seed| generate(kind, INFERENCE, seed).is_some())
+                .count();
+            assert!(
+                built > 0,
+                "{} never generated on {INFERENCE} in 50 seeds",
+                kind.name()
+            );
+        }
+    }
+
+    /// The default pool is a pool of *shapes*, not of sizes: it has to contain
+    /// non-squares, or the curriculum is the square one under a longer name.
+    #[test]
+    fn the_default_pool_is_mostly_not_square() {
+        let pool = Canvas::pool(DEFAULT_CANVAS_MIN, DEFAULT_CANVAS_MAX);
+        let squares = pool.iter().filter(|c| c.width == c.height).count();
+        assert!(
+            pool.len() > 2 * squares,
+            "{squares} of {} canvases are square -- the pool barely varies shape",
+            pool.len()
+        );
+        assert!(
+            pool.contains(&INFERENCE),
+            "the pool does not contain {INFERENCE}, the shape the issue infers on"
+        );
+    }
 }

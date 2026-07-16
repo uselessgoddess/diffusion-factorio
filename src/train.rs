@@ -526,4 +526,53 @@ mod tests {
         };
         assert_ne!(build_validation_set(&other), build_validation_set(&cfg));
     }
+
+    /// The default curriculum has to teach the whole vocabulary *on the shape the
+    /// issue infers on*, not merely somewhere in the pool. A canvas that only the
+    /// simple families fit is a canvas where the model has never been asked to
+    /// compose anything, and 13×9 is exactly the case the issue reports.
+    #[test]
+    fn the_default_curriculum_teaches_every_family_on_the_inference_canvas() {
+        let cfg = TrainConfig::default();
+        assert!(
+            cfg.canvases.contains(&Canvas::new(13, 9)),
+            "the default pool never draws the shape the issue infers on"
+        );
+        assert_eq!(
+            feasible_kinds(Canvas::new(13, 9)).len(),
+            LessonKind::all().len(),
+            "13x9 is missing lessons the model is expected to know there"
+        );
+        assert_eq!(
+            curriculum_kinds(&cfg.canvases).len(),
+            LessonKind::all().len()
+        );
+    }
+
+    /// Every canvas in the default pool must be able to hold *something*, or
+    /// `draw_sample` indexes an empty `kinds` and the run panics on whichever
+    /// step happens to draw that shape — a failure that would surface at minute
+    /// forty of a GPU run rather than here.
+    #[test]
+    fn every_canvas_in_the_default_pool_can_hold_a_lesson() {
+        for canvas in TrainConfig::default().canvases {
+            assert!(
+                !feasible_kinds(canvas).is_empty(),
+                "no lesson fits {canvas}, which the curriculum still draws"
+            );
+        }
+    }
+
+    /// A batch is one tensor and `GridBatch::from_grids` asserts against a ragged
+    /// one, so the per-batch draw is load-bearing rather than an optimization.
+    #[test]
+    fn a_batch_is_drawn_at_one_shape() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut seed_ctr = 0;
+        let canvas = Canvas::new(13, 9);
+        let (grids, _) = train_batch(canvas, 8, &mut rng, &mut seed_ctr);
+        assert!(grids
+            .iter()
+            .all(|g| (g.width, g.height) == (canvas.width, canvas.height)));
+    }
 }
