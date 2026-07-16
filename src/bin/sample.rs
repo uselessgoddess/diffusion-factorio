@@ -23,6 +23,7 @@ use diffusion_factorio::observability::{write_sample_report, SampleReportEntry};
 use diffusion_factorio::persist;
 use diffusion_factorio::sample::{reconstruct_with_diagnostics, SampleConfig};
 use diffusion_factorio::textual::render;
+use diffusion_factorio::train::feasible_kinds;
 use diffusion_factorio::world::Grid;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -36,8 +37,14 @@ struct Args {
     /// Checkpoint prefix (expects `<ckpt>.mpk` + `<ckpt>.json`).
     #[arg(long, default_value = "checkpoints/denoiser")]
     ckpt: PathBuf,
+    /// Canvas width to evaluate on.
     #[arg(long, default_value_t = 11)]
     size: usize,
+    /// Canvas height. Defaults to `--size`, so the old invocation still means a
+    /// square — but the shape the issue infers on is `--size 13 --height 9`, and
+    /// scoring the model there is the whole point of cause 5.
+    #[arg(long)]
+    height: Option<usize>,
     /// How many examples to print in detail.
     #[arg(long, default_value_t = 4)]
     show: usize,
@@ -85,15 +92,27 @@ fn main() -> anyhow::Result<()> {
     let mut rng = ChaCha8Rng::seed_from_u64(args.seed.wrapping_add(0xB1A2));
 
     // Build an evaluation set of blanked factories across all feasible lessons.
+    //
+    // `feasible_kinds` rather than every kind, and this is load-bearing: the loop
+    // below holds the kind fixed until it generates, so offering it a family that
+    // can never fit this canvas is an infinite loop rather than an error. That
+    // was reachable before any of this (`--size 9` cannot hold a circuit line),
+    // and asking for a rectangle is exactly what makes it easy to hit.
+    let canvas = Canvas::new(args.size, args.height.unwrap_or(args.size));
+    let feasible = feasible_kinds(canvas);
+    anyhow::ensure!(
+        !feasible.is_empty(),
+        "no lesson fits a {canvas} canvas -- nothing to evaluate on"
+    );
     let mut originals: Vec<Grid> = Vec::new();
     let mut partials: Vec<Grid> = Vec::new();
     let mut observed: Vec<Vec<bool>> = Vec::new();
     let mut kinds: Vec<LessonKind> = Vec::new();
     let mut ctr = args.seed;
     while originals.len() < args.eval {
-        let kind = LessonKind::all()[originals.len() % LessonKind::all().len()];
+        let kind = feasible[originals.len() % feasible.len()];
         ctr += 1;
-        if let Some(s) = generate(kind, Canvas::square(args.size), ctr) {
+        if let Some(s) = generate(kind, canvas, ctr) {
             let (partial, obs) = s.blank(None, &mut rng);
             originals.push(s.solution);
             partials.push(partial);
