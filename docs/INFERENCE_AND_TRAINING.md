@@ -467,18 +467,65 @@ and I would not train on it expecting §1's gap to stop collapsing.
 training process pins a single one. Your 5,000 GPU steps are not reproducible
 here, and I am not going to present CPU numbers as if they were.
 
-Measured on this box, `--size 11 --batch 32`:
+Price a train step and a validation pass separately, at the defaults otherwise
+(`--size 11 --batch 32 --hidden 64 --blocks 6`). One run with validation off,
+one with two passes in it; the difference is the pass:
 
-| what | cost |
+```bash
+echo "=== A: 12 steps, validation OFF ==="
+time cargo run --release --bin train -- --steps 12 --val-every 0 \
+  --out /tmp/bench-noval --metrics-out runs/bench-noval.jsonl
+echo "=== B: 12 steps, validation every 6 (n=512) ==="
+time cargo run --release --bin train -- --steps 12 --val-every 6 --val-batch 512 \
+  --out /tmp/bench-val --metrics-out runs/bench-val.jsonl
+```
+```text
+=== A: 12 steps, validation OFF ===
+real	7m57.924s
+=== B: 12 steps, validation every 6 (n=512) ===
+real	32m8.964s
+```
+
+Run B's own per-step record shows where the 24 extra minutes went — steps 6 and
+12 are the two validating ones, at ~750 s against a ~42 s neighbour:
+
+```text
+step  5  +  44.10s  val=no
+step  6  + 760.55s  val=YES
+step  7  +  45.75s  val=no
+...
+step 11  +  39.02s  val=no
+step 12  + 742.71s  val=YES
+```
+
+| what | cost on this box |
 |---|---|
-| 20 steps *including* two `n=512` validation passes | **31m52s** |
-| a 4,000-step demo checkpoint, extrapolated | **12+ hours** |
+| a train step | **39.75 s** (A: 476.94 s ÷ 12) |
+| an `n=512` validation pass | **~726 s** ≈ 12 min (B − A, halved) — about **18 train steps** |
+| 4,000 train steps, validation off | **~44 h** |
+| 5,000 train steps at the default `--val-every 200` | **~60 h**, of which validation is **8.4%** |
 
-The validation passes dominate: `n=512` in two modes is full reconstruction
-sampling, on CPU, on one core. On a GPU the whole 5,000-step run is ~2.3 minutes
-of train steps (median 27.76 ms/step) — validation is what the `--val-batch` and
-`--val-every` knobs are for, and on CPU they are the difference between a usable
-smoke run and an overnight one.
+**Retracted: this section used to say a demo checkpoint was "12+ hours" and that
+"the validation passes dominate". Both are wrong.** They came from one 20-step
+run that had two validation passes inside it (31m52s) and no way to tell the two
+costs apart. I charged nearly all of it to validation, which implicitly priced a
+train step at 10.8 s. Run A prices it with nothing else in the run: **39.75 s**,
+~4× that, and ~1,400× the GPU's 27.76 ms median from your log.
+
+That inverts the advice that followed. A validation pass really is expensive in
+absolute terms — 12 minutes, because `n=512` in two modes is full reconstruction
+sampling on one core — but it is expensive *next to a train step that is itself
+expensive*, and at the default `--val-every 200` it buys 25 passes across 5,000
+steps: **8.4% of the run**. Turning validation off entirely takes ~60 h down to
+~55 h. `--val-batch` and `--val-every` are not the difference between a smoke run
+and an overnight one; on CPU there is no smoke run to reach. The knob that
+matters is `--steps`.
+
+One caveat on the 39.75 s: an earlier run on this same box averaged 60.8 s/step
+(36 steps, `"val":null` throughout). You cannot check that one — it sat in
+`runs/`, which is gitignored, and its flags were never recorded, which is why I
+am not folding it in. Take it only as a reason to read 39.75 s as a floor
+measured on an idle box rather than a guarantee.
 
 **So the screenshots in this branch are of an untrained model**, and are labelled
 as such. They demonstrate that the server, the simulator verdict and the reveal
