@@ -110,6 +110,20 @@ paste-ready blueprint string:
 cargo run --release --example gallery   # writes gallery.html
 ```
 
+Both of those show the model against tasks *someone generated*. To pose one
+nobody generated — paint sources, sinks and obstacles by hand and watch the model
+design the factory between them:
+
+```bash
+cargo run --release --bin serve -- --ckpt checkpoints/denoiser   # 127.0.0.1:8080
+```
+
+The server runs Best-of-N, scores every candidate through the simulator, and
+shows the winner beside its runners-up with a scrubber that replays the order the
+model committed cells in. Inference is CPU/ndarray whatever the checkpoint was
+trained on: a viewer that needs a GPU is a viewer nobody opens. It is
+single-threaded with no TLS and no auth — keep it on localhost.
+
 To inspect the result
 in Factorio, copy `generated-blueprint.txt`, open the Blueprint Library (`B`),
 click **Import string**, and paste it. Abstract source/sink anchors appear as
@@ -135,7 +149,10 @@ for the mapping and current simulation-parity limits.
 | `persist.rs` | Checkpoint save/load (`CompactRecorder` + JSON config) |
 | `textual.rs` | ASCII rendering so every output is eyeballable |
 | `viewer.rs` | SVG rendering at Factorio's real footprints — the human's view |
-| `bin/` | `gen_data`, `train`, `sample` CLIs |
+| `throughput.rs` | Graded items/s — the metric that ranks two *working* factories |
+| `best_of_n.rs` | Draw N, verify each through the simulator, keep the winner |
+| `serve.rs` | Hand-painted tasks → design → simulator verdict, over HTTP |
+| `bin/` | `gen_data`, `train`, `sample`, `serve` CLIs |
 
 ## Backends
 
@@ -147,6 +164,11 @@ for the mapping and current simulation-parity limits.
 
 ## Documentation
 
+- [`docs/INFERENCE_AND_TRAINING.md`](docs/INFERENCE_AND_TRAINING.md) — how to read
+  a training log without fooling yourself, what to watch locally, and where the
+  project goes next. Start here.
+- [`docs/RL_ANALYSIS.md`](docs/RL_ANALYSIS.md) — where the project actually is,
+  and why RL is still not next.
 - [`docs/TRAINING_ANALYSIS.md`](docs/TRAINING_ANALYSIS.md) — what the first
   converged GPU run does and does not prove, with re-derivable numbers.
 - [`docs/ANALYSIS.md`](docs/ANALYSIS.md) — reference analysis: what to borrow, what to reject.

@@ -449,6 +449,22 @@ admits many answers (§3.3, and now §3.4). The fourth, unstated one is green to
 sharpen, not one memorized answer. That is all *necessary*, and none of it is
 *sufficient*.
 
+> **This section said "all three are now green" while one of them was red, and
+> a user found it rather than a test.** Issue #11 pointed out that Factorio feeds
+> many machines from *one* line — via a splitter, or a row of inserters tapping it
+> in sequence. The simulator scored the sequential-tap arrangement at **0.000**:
+> not "poorly", but *the item never arrives*, because a belt only offered its
+> items to the tile in front of it. Fixed in `c7aef5e`; the same board now scores
+> **0.430/s at each of three sinks from one source**
+> ([`INFERENCE_AND_TRAINING.md §4`](INFERENCE_AND_TRAINING.md#4-the-shared-line-you-were-right-and-the-simulator-was-wrong)).
+> Precondition #3 — a reward function worth optimizing — was **not met when this
+> section declared it met**, and the failure was of exactly the kind this document
+> warns about two paragraphs below: the reward function silently disagreeing with
+> the game. Had RL run against it, the policy would have learned that shared lines
+> do not work. The lesson is not "the bug is fixed"; it is that **"verified" was
+> asserted, never measured**, and the simulator's agreement with Factorio is still
+> only spot-checked (§7, and `VIEWER.md`'s parity table).
+
 **Start from the reference's result (§4): PPO + 45M samples + a full throughput
 engine ≈ 0 on assembler lessons.** The experiment has been run, at a scale we are
 nowhere near, and RL did not deliver the thing we want. That is not proof it
