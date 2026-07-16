@@ -75,3 +75,7 @@ path = "experiments/sampling_defaults.rs"
 [[example]]
 name = "grid_shape"
 path = "experiments/grid_shape.rs"
+
+[[example]]
+name = "issue_examples"
+path = "experiments/issue_examples.rs"

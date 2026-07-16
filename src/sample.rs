@@ -259,7 +259,7 @@ struct CellPrediction {
     entropy: f32,
 }
 
-/// Choose a cell by scoring the 57 legal combinations under the product of the
+/// Choose a cell by scoring the 45 legal combinations under the product of the
 /// per-channel heads, rather than choosing each channel on its own.
 ///
 /// Picking each channel independently is what put `TransportBelt` next to
@@ -268,7 +268,7 @@ struct CellPrediction {
 /// more likely than floor, and the direction head correctly reports that no
 /// single heading beats `None` once the belt's mass is split four ways. The
 /// mistake is in combining them, because their product ranges over 720
-/// combinations and only 57 of those are cells. See [`world::legal_cells`].
+/// combinations and only 45 of those are cells. See [`world::legal_cells`].
 ///
 /// Restricting the argmax to the legal set is the same model, read correctly:
 /// it is the maximum-likelihood cell under the network's own distribution given
@@ -340,7 +340,7 @@ fn argmax_legal(scores: &[f64]) -> usize {
 
 /// Temperature-scaled categorical draw over the legal cells, from their joint
 /// log-probabilities. Softmax is taken in log-space against the maximum so a
-/// long-tailed 57-way distribution cannot underflow to all-zero weights — the
+/// long-tailed 45-way distribution cannot underflow to all-zero weights — the
 /// old per-channel version raised probabilities to `1/temp` directly, which is
 /// only safe because each channel had at most eight categories.
 fn sample_legal(scores: &[f64], temp: f64, rng: &mut ChaCha8Rng) -> usize {

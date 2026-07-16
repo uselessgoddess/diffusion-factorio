@@ -450,6 +450,27 @@ impl Cell {
         if has_item && !item_bearing {
             return false;
         }
+        // An assembler's tag *is* its recipe, so a tag that names no recipe
+        // leaves a nine-tile machine that cannot craft: `sim::emits` returns
+        // nothing for it, and `blueprint.rs` exports an `assembling-machine-1`
+        // with no `recipe` field — one you would have to click a recipe into by
+        // hand before the pasted factory did anything.
+        //
+        // This rule is why the check is not symmetric with `Source`/`Sink`,
+        // which stay legal untagged: there, `Item::None` *means* something — no
+        // filter, accepts or offers anything (`sim::sink_accepts`). On an
+        // assembler it means nothing at all. `Item::IronPlate` is rejected for
+        // the same reason and not a different one: a plate is smelted, no
+        // assembler recipe produces it, so tagging a machine with it is the
+        // same dead cell wearing a different id.
+        //
+        // Without this the issue's first example passes every legality check we
+        // have while delivering 0.000/s (`experiments/issue_examples`), and
+        // `sample::decode_cell` — which only ever picks from this table — would
+        // keep proposing the dead cell as a perfectly good answer.
+        if self.entity == Entity::Assembler && self.item.recipe().is_none() {
+            return false;
+        }
         true
     }
 }
@@ -458,7 +479,7 @@ impl Cell {
 /// in `[entity, direction, item, misc]` id order.
 ///
 /// The product of the four vocabularies is 8·5·6·3 = 720 combinations, of which
-/// only **57** are legal cells. The other 663 are not rare or unlikely — they do
+/// only **45** are legal cells. The other 675 are not rare or unlikely — they do
 /// not exist. `TransportBelt` with `Direction::None` is one of them, and it is
 /// what a decoder that picks each channel independently emits whenever the
 /// entity head is sure something is there while the direction head is unsure
@@ -469,7 +490,7 @@ impl Cell {
 ///
 /// Enumerating the legal set once lets [`crate::sample`] decode the most likely
 /// *legal* cell instead of the product of four separately-most-likely channels.
-/// The table is small enough to scan per cell (57 × 4 lookups) and exact enough
+/// The table is small enough to scan per cell (45 × 4 lookups) and exact enough
 /// that no legal factory is ever excluded.
 pub fn legal_cells() -> &'static [[usize; N_CHANNELS]] {
     static LEGAL: std::sync::OnceLock<Vec<[usize; N_CHANNELS]>> = std::sync::OnceLock::new();
@@ -659,15 +680,16 @@ mod tests {
     use super::*;
 
     /// The legal set is the whole reason constrained decoding is cheap: it is a
-    /// 57-row table, not a search. If a channel gains a category this number
+    /// 45-row table, not a search. If a channel gains a category this number
     /// moves, and that is worth noticing rather than absorbing silently.
     #[test]
-    fn only_fifty_seven_of_seven_hundred_and_twenty_cells_are_legal() {
+    fn only_forty_five_of_seven_hundred_and_twenty_cells_are_legal() {
         let total: usize = VOCAB.iter().product();
         assert_eq!(total, 720);
-        assert_eq!(legal_cells().len(), 57);
+        assert_eq!(legal_cells().len(), 45);
         // Per entity: Empty 1, Source 6, Sink 6, belt 4, underground 4×2,
-        // splitter 4, inserter 4, assembler 4×6.
+        // splitter 4, inserter 4, assembler 4×3 (only the craftables: a
+        // machine tagged with a plate, or with nothing, has no recipe to run).
         let per_entity = |e: Entity| {
             legal_cells()
                 .iter()
@@ -681,7 +703,54 @@ mod tests {
         assert_eq!(per_entity(Entity::UndergroundBelt), 8);
         assert_eq!(per_entity(Entity::Splitter), 4);
         assert_eq!(per_entity(Entity::Inserter), 4);
-        assert_eq!(per_entity(Entity::Assembler), 24);
+        assert_eq!(per_entity(Entity::Assembler), 12);
+    }
+
+    /// A machine with no recipe is not a machine.
+    ///
+    /// This is the fault the issue's first example was built on: every cell of
+    /// it passes `is_consistent`, the blueprint imports, and it delivers
+    /// 0.000/s, because the assembler carries no recipe and
+    /// [`crate::sim::emits`] has nothing to craft. A legality check that blesses
+    /// it teaches `consistent` to score a dead factory full marks, and hands
+    /// [`crate::sample::decode_cell`] a dead cell to choose from.
+    #[test]
+    fn an_assembler_without_a_recipe_is_not_a_legal_cell() {
+        let machine = |item| Cell {
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item,
+            misc: Misc::None,
+        };
+        // Untagged, and tagged with something no assembler can craft.
+        assert!(!machine(Item::None).is_consistent());
+        assert!(!machine(Item::IronPlate).is_consistent());
+        assert!(!machine(Item::CopperPlate).is_consistent());
+        // Tagged with a real recipe.
+        for item in Item::craftable() {
+            assert!(machine(item).is_consistent(), "{item:?} is craftable");
+        }
+        // A port is the asymmetric case, and stays legal untagged: there
+        // `Item::None` means "no filter" rather than "nothing to do".
+        for entity in [Entity::Source, Entity::Sink] {
+            let port = Cell {
+                entity,
+                direction: Direction::None,
+                item: Item::None,
+                misc: Misc::None,
+            };
+            assert!(port.is_consistent(), "{entity:?} may go untagged");
+        }
+        // And nothing in the table the decoder picks from can be a dead machine.
+        for ids in legal_cells() {
+            let cell = Cell::from_ids(*ids).unwrap();
+            if cell.entity == Entity::Assembler {
+                assert!(
+                    cell.item.recipe().is_some(),
+                    "dead machine in table: {cell:?}"
+                );
+            }
+        }
     }
 
     /// Every row of the table is a cell you can actually build, and every cell
