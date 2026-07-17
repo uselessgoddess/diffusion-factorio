@@ -58,21 +58,15 @@ jobs:
             --ckpt /tmp/ci-ckpt/denoiser --show 2 --eval 128 \
             | tee sample.log
 
-  # Does training on many canvas shapes actually beat training on one square?
+  # Does matching the training objective to scratch inference fix the two
+  # assembler families that scored 0/64 in the uploaded 5,000-step run?
   #
-  # This is the experiment behind cause 5 in docs/GENERALIZATION.md, and it is
-  # the one claim in this repo that cannot be settled by an assertion: the
-  # coverage argument (experiments/canvas_curriculum, no model needed) proves a
-  # square curriculum *cannot show* two of eight families on 13x9, but whether
-  # the shape-mixed pool makes the model build better factories there is a
-  # question about weights, and only a run answers it.
+  # Both arms use the same mixed-shape curriculum, direct-recipe family and
+  # architecture. The control alone restores the old protected scaffold and
+  # removes exact t=1 examples. Unit tests prove the mask mechanics; this slower
+  # run tests what weights learn from them.
   #
-  # Both arms are trained identically except for the curriculum, then handed the
-  # same fixed task on eight canvases. Read the 13x9 row: it is what the issue
-  # ran and what the control has never seen. Two runs on a hosted CPU runner is
-  # a slow job, so it does not gate every push -- it is here so the decision can
-  # be rechecked without anyone pinning a laptop for an hour.
-  curriculum:
+  objective:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -80,11 +74,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arm: square
-            # The control: one 11x11 canvas, the curriculum as it shipped.
-            flags: --size 11
-          - arm: shapes
-            # Every width x height in 9..=15, one shape per batch.
+          - arm: legacy
+            flags: --legacy-protected-scaffold --scratch-probability 0
+          - arm: task
             flags: ""
     steps:
       - uses: actions/checkout@v4
@@ -100,20 +92,18 @@ jobs:
             --metrics-out runs/${{ matrix.arm }}-metrics.jsonl \
             --report-out runs/${{ matrix.arm }}-report.html \
             | tee runs/${{ matrix.arm }}-train.log
-      - name: score the same task on eight canvas shapes
+      - name: summarize scratch performance by lesson
         run: |
-          cargo run --release --example grid_shape -- \
-            /tmp/ckpt-${{ matrix.arm }}/denoiser \
-            | tee runs/${{ matrix.arm }}-grid-shape.log
-      - name: summary
-        run: |
-          {
-            echo "## curriculum: ${{ matrix.arm }}"
-            echo '```'
-            cat runs/${{ matrix.arm }}-grid-shape.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          node -e '
+            const fs=require("fs");
+            const rows=fs.readFileSync(process.argv[1],"utf8").trim().split("\n").map(JSON.parse);
+            const last=[...rows].reverse().find(r=>r.val_scratch);
+            console.log(`## objective: ${{ matrix.arm }}`);
+            console.log(`aggregate functional: ${last.val_scratch.functional_rate.toFixed(3)}`);
+            for (const [name,value] of Object.entries(last.val_scratch_by_lesson))
+              console.log(`${name}: functional=${value.functional_rate.toFixed(3)} throughput=${value.throughput.toFixed(3)}`);
+          ' runs/${{ matrix.arm }}-metrics.jsonl | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: curriculum-${{ matrix.arm }}
+          name: objective-${{ matrix.arm }}
           path: runs/

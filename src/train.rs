@@ -65,6 +65,9 @@ pub struct TrainConfig {
     /// Reverse-diffusion rounds used during validation.
     pub sample_steps: usize,
     pub seed: u64,
+    /// Reproduce the historical target-leaking conditioning for controlled
+    /// experiments. Production training must leave this false.
+    pub legacy_protected_scaffold: bool,
     pub model: DenoiserConfig,
     pub diffusion: DiffusionConfig,
 }
@@ -82,6 +85,7 @@ impl Default for TrainConfig {
             val_batch: 512,
             sample_steps: 12,
             seed: 0,
+            legacy_protected_scaffold: false,
             model: DenoiserConfig::new(),
             diffusion: DiffusionConfig::new(),
         }
@@ -168,7 +172,13 @@ where
         // ragged one. Across steps the shape still varies, which is the axis
         // that matters.
         let canvas = cfg.canvases[data_rng.gen_range(0..cfg.canvases.len())];
-        let (grids, observed) = train_batch(canvas, cfg.batch_size, &mut data_rng, &mut seed_ctr);
+        let (grids, observed) = train_batch(
+            canvas,
+            cfg.batch_size,
+            &mut data_rng,
+            &mut seed_ctr,
+            cfg.legacy_protected_scaffold,
+        );
         let batch = GridBatch::<B>::from_grids(&grids, Some(&observed), device);
 
         let (loss_t, stats) = loss(&model, &batch, &cfg.diffusion);
@@ -331,12 +341,19 @@ fn train_batch(
     batch: usize,
     rng: &mut ChaCha8Rng,
     seed_ctr: &mut u64,
+    legacy_protected_scaffold: bool,
 ) -> (Vec<Grid>, Vec<Vec<bool>>) {
     let mut grids = Vec::with_capacity(batch);
     let mut observed = Vec::with_capacity(batch);
     for _ in 0..batch {
         let s = draw_sample(canvas, rng, seed_ctr);
-        let (_, obs) = s.blank_to_scaffold();
+        let obs = if legacy_protected_scaffold {
+            (0..s.solution.len())
+                .map(|i| s.protected.contains(&i))
+                .collect()
+        } else {
+            s.blank_to_scaffold().1
+        };
         grids.push(s.solution);
         observed.push(obs);
     }
@@ -602,7 +619,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let mut seed_ctr = 0;
         let canvas = Canvas::new(13, 9);
-        let (grids, _) = train_batch(canvas, 8, &mut rng, &mut seed_ctr);
+        let (grids, _) = train_batch(canvas, 8, &mut rng, &mut seed_ctr, false);
         assert!(grids
             .iter()
             .all(|g| (g.width, g.height) == (canvas.width, canvas.height)));
@@ -617,7 +634,8 @@ mod tests {
     fn training_batches_do_not_reveal_assembler_answers() {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let mut seed_ctr = 0;
-        let (grids, observed) = train_batch(Canvas::new(13, 9), 128, &mut rng, &mut seed_ctr);
+        let (grids, observed) =
+            train_batch(Canvas::new(13, 9), 128, &mut rng, &mut seed_ctr, false);
 
         let mut assemblers = 0;
         for (grid, mask) in grids.iter().zip(&observed) {
@@ -636,5 +654,17 @@ mod tests {
             assemblers > 0,
             "deterministic batch did not exercise a machine lesson"
         );
+    }
+
+    #[test]
+    fn legacy_control_reproduces_revealed_assembler_answers() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut seed_ctr = 0;
+        let (grids, observed) = train_batch(Canvas::new(13, 9), 128, &mut rng, &mut seed_ctr, true);
+        assert!(grids.iter().zip(&observed).any(|(grid, mask)| grid
+            .cells
+            .iter()
+            .enumerate()
+            .any(|(i, cell)| cell.entity == crate::world::Entity::Assembler && mask[i])));
     }
 }

@@ -72,6 +72,9 @@ struct Args {
     structure_weight: f64,
     #[arg(long, default_value_t = 0)]
     seed: u64,
+    /// Reproduce the old answer-leaking scaffold for an A/B control only.
+    #[arg(long, default_value_t = false)]
+    legacy_protected_scaffold: bool,
     /// Checkpoint path prefix (writes `<out>.mpk` + `<out>.json`).
     #[arg(long, default_value = "checkpoints/denoiser")]
     out: PathBuf,
@@ -120,6 +123,7 @@ fn main() -> anyhow::Result<()> {
         val_batch: args.val_batch,
         sample_steps: args.sample_steps,
         seed: args.seed,
+        legacy_protected_scaffold: args.legacy_protected_scaffold,
         model: model_cfg.clone(),
         diffusion: DiffusionConfig::new()
             .with_elbo_weight(args.elbo)
@@ -166,6 +170,7 @@ fn main() -> anyhow::Result<()> {
         val_batch: cfg.val_batch,
         sample_steps: cfg.sample_steps,
         seed: cfg.seed,
+        legacy_protected_scaffold: cfg.legacy_protected_scaffold,
         peak_lr: cfg.lr,
         warmup_steps: cfg.warmup,
         grad_clip: cfg.grad_clip,
