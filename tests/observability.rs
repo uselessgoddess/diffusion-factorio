@@ -164,6 +164,7 @@ fn html_report_embeds_parameters_and_metric_charts() {
         time_dim: 64,
         elbo_weight: false,
         t_min: 0.02,
+        scratch_probability: 0.25,
         structure_weight: 8.0,
     };
     write_training_report(&path, &metadata, &example_logs()).unwrap();
@@ -171,6 +172,7 @@ fn html_report_embeds_parameters_and_metric_charts() {
 
     assert!(html.contains("Training report"));
     assert!(html.contains("structure_weight"));
+    assert!(html.contains("scratch_probability"));
     assert!(html.contains("Functional / exact / consistent"));
     assert!(html.contains("Built from scratch"));
     assert!(html.contains("Placement recall"));

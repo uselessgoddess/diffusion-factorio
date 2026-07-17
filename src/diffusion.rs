@@ -31,6 +31,15 @@ pub struct DiffusionConfig {
     /// Clamp `t` into `[t_min, 1]` to bound the `1/t` weight's variance.
     #[config(default = 0.02)]
     pub t_min: f64,
+    /// Fraction of examples trained at exactly `t = 1`, matching the fully
+    /// masked state from which reverse diffusion starts.
+    ///
+    /// A continuous draw from `[t_min, 1)` has zero probability of producing
+    /// that state. On a board with many answer cells, even a draw near one is
+    /// overwhelmingly unlikely to mask every cell at once, so scratch sampling
+    /// was an out-of-distribution input despite being the main evaluation mode.
+    #[config(default = 0.25)]
+    pub scratch_probability: f64,
     /// Loss weight multiplier for cells whose target entity is *not* `Empty`.
     ///
     /// The entity channel is ~95% `Empty`, so an unweighted objective is trivially
@@ -94,12 +103,22 @@ pub struct Masked<B: Backend> {
 ///
 /// Observed cells (`batch.observed`) are never masked — that is what makes the
 /// process conditional / an inpainter.
-pub fn apply_masking<B: Backend>(batch: &GridBatch<B>, t_min: f64) -> Masked<B> {
+pub fn apply_masking<B: Backend>(batch: &GridBatch<B>, cfg: &DiffusionConfig) -> Masked<B> {
     let device = batch.tokens.device();
     let [n, _c, h, w] = batch.tokens.dims();
 
-    // Per-sample masking rate t ~ U(t_min, 1).
-    let t = Tensor::<B, 1>::random([n], Distribution::Uniform(t_min, 1.0), &device);
+    assert!(
+        (0.0..=1.0).contains(&cfg.scratch_probability),
+        "scratch_probability must be in [0, 1]"
+    );
+
+    // Most examples use t ~ U(t_min, 1). A configurable fraction are set to
+    // exactly one so training includes the reverse process's initial state.
+    let random_t = Tensor::<B, 1>::random([n], Distribution::Uniform(cfg.t_min, 1.0), &device);
+    let scratch = Tensor::<B, 1>::random([n], Distribution::Uniform(0.0, 1.0), &device)
+        .lower_elem(cfg.scratch_probability)
+        .float();
+    let t = random_t.mul(scratch.clone().neg().add_scalar(1.0)) + scratch;
     let t_full = Tensor::<B, 3>::zeros([n, h, w], &device) + t.clone().reshape([n, 1, 1]);
 
     // Bernoulli(t) per cell, then exclude observed cells.
@@ -137,7 +156,7 @@ pub fn loss<B: Backend>(
     batch: &GridBatch<B>,
     cfg: &DiffusionConfig,
 ) -> (Tensor<B, 1>, StepStats) {
-    let masked = apply_masking(batch, cfg.t_min);
+    let masked = apply_masking(batch, cfg);
     let logits = model.forward(masked.input, batch.obstacle.clone(), masked.t.clone());
 
     let [n, _c, h, w] = batch.tokens.dims();
@@ -238,13 +257,42 @@ mod tests {
             Some(std::slice::from_ref(&observed)),
             &device,
         );
-        let masked = apply_masking(&batch, 0.9); // high t -> most non-observed masked
+        let cfg = DiffusionConfig::new()
+            .with_t_min(0.9)
+            .with_scratch_probability(0.0);
+        let masked = apply_masking(&batch, &cfg); // high t -> most non-observed masked
         let mask_data: Vec<f32> = masked.mask.to_data().convert::<f32>().into_vec().unwrap();
         // Observed cells are never masked.
         for (i, &o) in observed.iter().enumerate() {
             if o {
                 assert_eq!(mask_data[i], 0.0);
             }
+        }
+    }
+
+    #[test]
+    fn scratch_examples_mask_every_answer_but_never_the_task_anchors() {
+        type B = CpuBackend;
+        let device = Default::default();
+        let s = generate(LessonKind::AssemblerLine, Canvas::square(11), 5).unwrap();
+        let (_, observed) = s.blank_to_scaffold();
+        let batch = GridBatch::<B>::from_grids(
+            std::slice::from_ref(&s.solution),
+            Some(std::slice::from_ref(&observed)),
+            &device,
+        );
+        let cfg = DiffusionConfig::new().with_scratch_probability(1.0);
+        let masked = apply_masking(&batch, &cfg);
+        let mask: Vec<f32> = masked.mask.to_data().convert::<f32>().into_vec().unwrap();
+        let times: Vec<f32> = masked.t.to_data().convert::<f32>().into_vec().unwrap();
+
+        assert_eq!(times, vec![1.0]);
+        for (i, &anchor) in observed.iter().enumerate() {
+            assert_eq!(
+                mask[i],
+                if anchor { 0.0 } else { 1.0 },
+                "wrong scratch mask at cell {i}"
+            );
         }
     }
 

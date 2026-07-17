@@ -64,6 +64,9 @@ struct Args {
     /// Minimum sampled diffusion time (bounds ELBO variance).
     #[arg(long, default_value_t = 0.02)]
     t_min: f64,
+    /// Fraction of batches trained from the exact fully masked start state.
+    #[arg(long, default_value_t = 0.25)]
+    scratch_probability: f64,
     /// Extra loss weight for non-empty cells (prevents empty collapse).
     #[arg(long, default_value_t = 8.0)]
     structure_weight: f64,
@@ -121,6 +124,7 @@ fn main() -> anyhow::Result<()> {
         diffusion: DiffusionConfig::new()
             .with_elbo_weight(args.elbo)
             .with_t_min(args.t_min)
+            .with_scratch_probability(args.scratch_probability)
             .with_structure_weight(args.structure_weight),
     };
 
@@ -171,6 +175,7 @@ fn main() -> anyhow::Result<()> {
         time_dim: cfg.model.time_dim,
         elbo_weight: cfg.diffusion.elbo_weight,
         t_min: cfg.diffusion.t_min,
+        scratch_probability: cfg.diffusion.scratch_probability,
         structure_weight: cfg.diffusion.structure_weight,
     };
     write_training_report(&args.report_out, &metadata, &logs)?;
