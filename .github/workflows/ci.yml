@@ -65,7 +65,9 @@ jobs:
   objective:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # The measured 3,000-step control took 115 minutes. Keep enough room for
+    # lesson-specific decoding and artifact upload without obscuring hangs.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -76,10 +78,18 @@ jobs:
           cargo run --release --bin train -- \
             --steps 3000 --batch 16 --hidden 32 --blocks 4 \
             --val-every 500 --val-batch 128 \
-            --out /tmp/ckpt-deterministic/denoiser \
+            --out runs/deterministic-denoiser \
             --metrics-out runs/deterministic-metrics.jsonl \
             --report-out runs/deterministic-report.html \
             | tee runs/deterministic-train.log
+      - name: inspect hard assembler lesson from scratch
+        run: |
+          cargo run --release --bin sample -- \
+            --ckpt runs/deterministic-denoiser \
+            --lesson ASSEMBLER_CHAOS --scratch \
+            --size 13 --height 9 --show 16 --eval 128 --steps 12 \
+            --report runs/assembler-chaos-scratch.html \
+            | tee runs/assembler-chaos-scratch.log
       - name: summarize scratch performance by lesson
         run: |
           node -e '
@@ -89,7 +99,7 @@ jobs:
             console.log("## objective: deterministic task target");
             console.log(`aggregate functional: ${last.val_scratch.functional_rate.toFixed(3)}`);
             for (const [name,value] of Object.entries(last.val_scratch_by_lesson))
-              console.log(`${name}: functional=${value.functional_rate.toFixed(3)} throughput=${value.throughput.toFixed(3)}`);
+              console.log(`${name}: functional=${value.functional_rate.toFixed(3)} throughput=${value.throughput.toFixed(3)} assembler=${value.assembler_recall.toFixed(3)} recipe=${value.recipe_accuracy.toFixed(3)} inserter=${value.inserter_recall.toFixed(3)}/${value.inserter_direction_accuracy.toFixed(3)} belt=${value.belt_recall.toFixed(3)}/${value.belt_direction_accuracy.toFixed(3)}`);
           ' runs/deterministic-metrics.jsonl | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:

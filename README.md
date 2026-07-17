@@ -99,6 +99,10 @@ cargo run --release --features wgpu --bin train -- --steps 50000 --out checkpoin
 # Validatable inference: blank known factories, reconstruct, and score
 cargo run --release --bin sample -- --ckpt checkpoints/denoiser --show 4 --eval 256
 
+# Hard design check: source/sink-only conditioning for one lesson family
+cargo run --release --bin sample -- --ckpt checkpoints/denoiser \
+  --scratch --lesson ASSEMBLER_CHAOS --size 13 --height 9 --eval 128
+
 # Also export the first reconstruction to Factorio's import-string format
 cargo run --release --bin sample -- --ckpt checkpoints/denoiser \
   --blueprint-out generated-blueprint.txt
