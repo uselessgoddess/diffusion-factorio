@@ -437,9 +437,11 @@ offsets, not lessons. **The room was never the constraint.**
 The control that shows what does work is `MOVE_ONE_ITEM_CHAOS` and now
 `ASSEMBLER_CHAOS`: they do not stamp a template, they scatter obstacles into the
 conditioning plane and derive the answer by BFS *through* them. `ASSEMBLER_CHAOS`
-scores **197,228 distinct answers from 200,000 seeds** against `ASSEMBLER_LINE`'s
-1. A 5,000-step run sees each task ~0.1× instead of ~254×: the model cannot meet
-the same task twice, which is the point.
+produces **more than 150 task-conditioned answers in 200 seeds** against
+`ASSEMBLER_LINE`'s 2. Its visible source, sink, recipe, and obstacles are created
+first; a deterministic solver then derives the machine pose and routes. An older
+197,228 / 200,000 count included hidden random machine choices, which were label
+noise rather than inferable diversity.
 
 **The recipe is known and it is not RL: randomize the world, derive the label by
 search rather than stamping it.** `UNDERGROUND_CROSS`, `ASSEMBLER_BANK` and

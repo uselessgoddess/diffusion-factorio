@@ -151,8 +151,8 @@ the board size — `ASSEMBLER_LINE` is `2(S−6)(S−2)`, `CIRCUIT_LINE` is
 
 ```
                             factories   shapes    of which        answers
-ASSEMBLER_LINE      S=11           90        2   45× translation        1
-                    S=19          442        2  221× translation        1
+ASSEMBLER_LINE      S=11           90        2   45× translation        2
+                    S=19          442        2  221× translation        2
 ASSEMBLER_BANK      S=11           90        6   15× translation        6
                     S=19          858        6  143× translation        6
 CIRCUIT_LINE        S=11           21        3    7× translation        3
@@ -170,16 +170,15 @@ green circuit needs two inputs, so `Item::single_input_craftable()` is two long)
 `CIRCUIT_LINE` three cable feeds. **Thirteen layouts across the four lessons that
 build real factories.**
 
-The `answers` column is worse still, and it is the one to trust. `shapes` keys the
+The `answers` column is the one to trust. `shapes` keys the
 whole board, so a family that scatters obstacles scores a perfect count for free
 whether or not the obstacles change the label — which matters, because scattering
 obstacles is exactly the fix proposed below. `answers` keys only the cells the
-model is asked to fill, modulo translation, and it is the number a chaos family
-cannot fake. Under it, `ASSEMBLER_LINE` and `UNDERGROUND_CROSS` teach **one
-answer each, not two**: the recipe and the item ride the *protected* source and
-assembler cells, so the two shapes differ only where the model can already read
-the difference off the conditioning. The cells it must actually produce are the
-same picture every time — drawn ~254× per task in a 5,000-step run.
+model is asked to fill under production source/sink-only conditioning, modulo
+translation, and it is the number a chaos family cannot fake. `ASSEMBLER_LINE`
+teaches **two** answers because the assembler recipe must now be predicted;
+`UNDERGROUND_CROSS` still teaches one because its two source items lead to the
+same target entity pattern.
 `MOVE_ONE_ITEM_CHAOS` deflates too, from 200,000 to 17,855: honest, and still
 three orders of magnitude clear of the rest.
 
@@ -197,15 +196,15 @@ them, so the label is a function of a randomized world. **The bottleneck is not
 the size of the canvas — it is that four of six lessons paint the same picture on
 it. Give them the chaos treatment; see step 4.**
 
-**Step 4 has since done exactly that for the assembler lesson.**
-`ASSEMBLER_CHAOS` scores 197,228 answers against `ASSEMBLER_LINE`'s 1.
+**Step 4 has since done exactly that for the assembler lesson.** Under the
+production source/sink-only conditioning contract, 200 seeds produce more than
+150 task-conditioned `ASSEMBLER_CHAOS` answers against `ASSEMBLER_LINE`'s 2.
 
 A caution learned the hard way here: `Sample::blank` observes every cell it does
-not blank, so `removable` must list the region an answer *may* build, not the
-cells a given answer *did* build. Listing only the built cells leaves an unbuilt
-line observed-as-empty, which silently states the answer in the conditioning and
-returns ambiguity to 0. Any new ambiguous family must be checked under `blank`,
-not only under `blank_to_scaffold`.
+not blank. The old production path therefore left protected answer cells visible
+and silently stated part of the answer in the conditioning. Production now uses
+`blank_to_scaffold`, and analysis must use the same source/sink-only contract as
+training and scratch inference.
 
 **Next:** the remaining four families are still rigid. `move_one_item` is the
 valuable one to fix (~42k tasks, honest scale) — its BFS picks one shortest path
@@ -330,18 +329,20 @@ stamping a 7×3 rectangle. The label stops being a constant and becomes a functi
 of a world the model can see — which is the actual factory-design task, and is
 unbounded in variety at any board size.
 
-**Done for the assembler lesson: `ASSEMBLER_CHAOS`.** 197,228 distinct answers
-from 200,000 seeds, against `ASSEMBLER_LINE`'s 1, and none of them ambiguous —
-every task still has exactly one answer, so it needs no `is_ambiguous` handling.
-A 5,000-step run now sees each task ~0.1× instead of ~254×: the model cannot meet
-the same task twice, which is the point.
+**Done for the assembler lesson: `ASSEMBLER_CHAOS`.** Under the production
+source/sink-only conditioning contract, 200 seeds produce more than 150 distinct
+task-conditioned answers, against `ASSEMBLER_LINE`'s 2. The earlier 197,228 / 200,000
+figure counted randomly selected hidden machine poses as variety. Those poses
+were not inferable from the visible task and therefore acted as contradictory
+labels at scratch inference. The generator now creates source, sink, recipe, and
+obstacles first, then derives one canonical machine pose and route from them.
 
 The gallery makes the counts unnecessary. Four seeds of each, same board size:
 
 ![ASSEMBLER_LINE against ASSEMBLER_CHAOS](screenshots/gallery-assembler-chaos.png)
 
-The top row is the same factory four times, slid to another offset — which is the
-`answers: 1` result, drawn. The bottom row is four different factories, because
+The top row is one of two recipe factories, slid to another offset — the
+`answers: 2` result, drawn. The bottom row is four different factories, because
 the obstacles (grey) are in the conditioning and the belts have to get around
 them. Both rows route end to end and both are pasteable into Factorio.
 

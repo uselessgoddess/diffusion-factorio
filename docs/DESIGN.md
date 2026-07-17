@@ -78,6 +78,11 @@ predicting empty everywhere. We counter this directly:
   cells* — the honest "is it learning to build?" number, reported every step.
 - **Assembler and recipe metrics**: anchor recall and item accuracy restricted
   to assembler targets, so belts and `Item::None` cannot hide a machine failure.
+- **Assembler weighting is experimental**: `assembler_weight` defaults to the
+  neutral 1x. A hosted 8x comparison slightly improved the noisy
+  `ASSEMBLER_CHAOS` lesson but substantially hurt aggregate scratch behavior and
+  routing families; weighting could not repair a target that was not determined
+  by its conditioning.
 
 This is the most important design decision for *actually learning* rather than
 collapsing to the trivial empty solution. See `docs/ROADMAP.md`.

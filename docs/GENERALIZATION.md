@@ -58,6 +58,13 @@ test now requires every assembler answer to be unobserved. The historical mask
 remains available only behind `--legacy-protected-scaffold` for the controlled
 CI comparison.
 
+The archived hosted comparison confirms that this was a real learning bug, not
+only a mask-contract cleanup: task-only conditioning improved aggregate scratch
+functional accuracy from 61.7% to 64.1% and exact reconstruction from 20.3% to
+30.5%. `ASSEMBLER_LINE` exact reconstruction rose from 1/14 to 10/14, and
+`DIRECT_RECIPE` from 8/14 to 11/14. See the
+[controlled A/B run](https://github.com/uselessgoddess/diffusion-factorio/actions/runs/29562315762).
+
 Three adjacent mismatches are fixed at the same boundary:
 
 1. Sampling begins from every answer cell masked at exactly `t=1`, but a
@@ -70,6 +77,30 @@ Three adjacent mismatches are fixed at the same boundary:
 3. Aggregate item accuracy is mostly `Item::None`, and placement recall is
    dominated by belts. Reports now expose assembler-anchor recall and recipe
    accuracy restricted to assembler targets.
+
+## Why supervision alone did not fix `ASSEMBLER_CHAOS`
+
+The first A/B still reconstructed only 1/14 `ASSEMBLER_CHAOS` examples. Tracing
+the generator found a second, independent target leak: it randomly selected the
+assembler anchor and shuffled its load/unload faces *before* choosing the visible
+source and sink. From a fully masked scratch state, those hidden random choices
+were absent from the task. Multiple incompatible answers were therefore label
+noise, not useful diversity.
+
+Increasing assembler loss weight amplified that contradiction. At 8x extra
+assembler weight, `ASSEMBLER_CHAOS` moved only from 2/14 to 3/14 while aggregate
+scratch functional accuracy fell from 70.3% to 61.7%; several routing families
+regressed as well. The default remains the neutral 1x, with the knob retained
+for experiments. See the
+[hosted weighting A/B](https://github.com/uselessgoddess/diffusion-factorio/actions/runs/29570049536).
+
+`ASSEMBLER_CHAOS` now creates the visible task first, then deterministically
+chooses the closest feasible 3x3 assembler footprint and the shortest routable
+load/unload face pair. Thus the target is a function of source, sink, recipe,
+and obstacles—the exact information present at inference. Regression coverage
+checks the canonical machine and positive throughput across every supported
+canvas shape, while 200 seeds still produce more than 150 task-conditioned
+answers.
 
 ## Architecture: what to borrow, and what not to
 

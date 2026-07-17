@@ -92,13 +92,12 @@ recipes it can roll. The other 45× is the same template at another offset, whic
 a fully-convolutional denoiser generalizes over for free. The real number is 2,
 and it is 2 on a 19×19 board too. See `docs/ROADMAP.md` bottleneck 0.
 
-And 2 flatters it in turn. `task_space` grew an `answers` column that keys only
-the cells the model is *asked* to fill, and by that count `assembler_line` teaches
-**1**. The recipe rides the assembler cell, which is protected — the model reads
-it out of the conditioning rather than predicting it, so both "shapes" ask for the
-same cells to be filled with the same thing. One picture, drawn ~254× per task in
-a 5,000-step run. That is the strongest form of the argument below, and it is what
-`ASSEMBLER_CHAOS` (197,228 answers) was built to answer.)
+An earlier `task_space` pass counted only **1** answer because it used the old
+`Sample::blank` contract: the protected assembler and recipe remained visible,
+so the model was never asked to predict them. That diagnostic exposed the
+training bug. Production training and `task_space` now both use source/sink-only
+conditioning; the recipe is an answer, and `assembler_line` correctly has **2**
+task-conditioned answers. `ASSEMBLER_CHAOS` produces more than 150 in 200 seeds.)
 
 **The curriculum splits cleanly in half.**
 
@@ -109,8 +108,9 @@ a 5,000-step run. That is the strongest form of the argument below, and it is wh
   hundreds of times each. 1.000 here is **memorization**, and it is what makes
   the aggregate number look perfect.
 
-`assembler_chaos` has since moved the assembler half across the line — 197,228
-answers, each task seen ~0.1× per run, so the model cannot meet one twice.
+`assembler_chaos` has since moved the assembler half across the line: its
+source, sink, recipe, and obstacles define a canonical machine pose and route,
+and more than 150 task-conditioned answers appear in only 200 seeds.
 `underground_cross` is still on the memorizing side, and this table is the reason
 to expect the aggregate to *drop* when the rest follow: the run that produced the
 numbers in this document was scoring a curriculum half of which it had memorized.
