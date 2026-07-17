@@ -33,6 +33,10 @@ pub enum LessonKind {
     /// between them. The only machine lesson whose task space does not run out —
     /// see [`gen_assembler_chaos`].
     AssemblerChaos,
+    /// Ingredient sources feed one assembler directly. Covers every recipe,
+    /// including iron plate + copper cable → green circuit without an
+    /// unnecessary cable assembler.
+    DirectRecipe,
     /// Source → belt → underground(down..up) → belt → sink across a wall.
     /// Exercises misc (underground tags).
     UndergroundCross,
@@ -57,6 +61,7 @@ impl LessonKind {
             LessonKind::MoveOneItemChaos,
             LessonKind::AssemblerLine,
             LessonKind::AssemblerChaos,
+            LessonKind::DirectRecipe,
             LessonKind::UndergroundCross,
             LessonKind::AssemblerBank,
             LessonKind::CircuitLine,
@@ -69,6 +74,7 @@ impl LessonKind {
             LessonKind::MoveOneItemChaos => "MOVE_ONE_ITEM_CHAOS",
             LessonKind::AssemblerLine => "ASSEMBLER_LINE",
             LessonKind::AssemblerChaos => "ASSEMBLER_CHAOS",
+            LessonKind::DirectRecipe => "DIRECT_RECIPE",
             LessonKind::UndergroundCross => "UNDERGROUND_CROSS",
             LessonKind::AssemblerBank => "ASSEMBLER_BANK",
             LessonKind::CircuitLine => "CIRCUIT_LINE",
@@ -98,6 +104,7 @@ impl LessonKind {
             // The machine and its two inserters need 5 across in the worst case;
             // the rest is room for the router to have somewhere to route.
             LessonKind::AssemblerChaos => Canvas::square(7),
+            LessonKind::DirectRecipe => Canvas::new(DIRECT_W, DIRECT_H),
             // One row: `S b d # u b K`.
             LessonKind::UndergroundCross => Canvas::new(7, 1),
             LessonKind::AssemblerBank => Canvas::new(LINE_W, LINE_H * BANK_LINES),
@@ -288,6 +295,7 @@ pub fn generate(kind: LessonKind, canvas: Canvas, seed: u64) -> Option<Sample> {
             LessonKind::MoveOneItemChaos => gen_move_one_item(canvas, &mut rng, true),
             LessonKind::AssemblerLine => gen_assembler_line(canvas, &mut rng),
             LessonKind::AssemblerChaos => gen_assembler_chaos(canvas, &mut rng),
+            LessonKind::DirectRecipe => gen_direct_recipe(canvas, &mut rng),
             LessonKind::UndergroundCross => gen_underground_cross(canvas, &mut rng),
             LessonKind::AssemblerBank => gen_assembler_bank(canvas, &mut rng),
             LessonKind::CircuitLine => gen_circuit_line(canvas, &mut rng),
@@ -574,6 +582,125 @@ fn gen_assembler_line(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
     let removable = vec![grid.idx(x0 + 1, y), grid.idx(x0 + 5, y)];
     Some(Sample {
         kind: LessonKind::AssemblerLine,
+        solution: grid,
+        protected,
+        removable,
+    })
+}
+
+/// Width of a direct recipe: west source + inserter, 3×3 machine, output
+/// inserter + sink.
+const DIRECT_W: usize = 7;
+
+/// Height of a direct recipe: two rows for an optional north feed plus the
+/// machine's three rows.
+const DIRECT_H: usize = 5;
+
+/// Feed the ingredients already named by the task directly into one machine.
+///
+/// ```text
+///   . . . S . . .       optional second ingredient
+///   . . . i . . .
+///   . . A A A . .
+///   S i A A A i K       first ingredient → product
+///   . . A A A . .
+/// ```
+///
+/// [`LessonKind::CircuitLine`] intentionally teaches composition from copper
+/// plate: one assembler makes cable and another consumes it. That is a
+/// different task from a supplied-cable circuit build, where adding the cable
+/// assembler is wrong. This family makes the recipe graph explicit at the task
+/// boundary and samples every craftable product.
+fn gen_direct_recipe(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    if !LessonKind::DirectRecipe.fits(canvas) {
+        return None;
+    }
+    let x0 = rng.gen_range(0..=(canvas.width - DIRECT_W));
+    let y0 = rng.gen_range(0..=(canvas.height - DIRECT_H));
+    let recipe = *Item::craftable().choose(rng).unwrap();
+    let mut ingredients: Vec<Item> = recipe.ingredients().iter().map(|i| i.item).collect();
+    ingredients.shuffle(rng);
+
+    let machine = (x0 + 2, y0 + 2);
+    let west_source = (x0, y0 + 3);
+    let west_inserter = (x0 + 1, y0 + 3);
+    let north_source = (x0 + 3, y0);
+    let north_inserter = (x0 + 3, y0 + 1);
+    let output_inserter = (x0 + 5, y0 + 3);
+    let sink = (x0 + 6, y0 + 3);
+
+    let mut grid = canvas.grid();
+    grid.set(
+        west_source.0,
+        west_source.1,
+        Cell {
+            entity: Entity::Source,
+            item: ingredients[0],
+            ..Default::default()
+        },
+    );
+    grid.set(west_inserter.0, west_inserter.1, inserter(Direction::East));
+    if let Some(&second) = ingredients.get(1) {
+        grid.set(
+            north_source.0,
+            north_source.1,
+            Cell {
+                entity: Entity::Source,
+                item: second,
+                ..Default::default()
+            },
+        );
+        grid.set(
+            north_inserter.0,
+            north_inserter.1,
+            inserter(Direction::South),
+        );
+    }
+    grid.set(
+        machine.0,
+        machine.1,
+        Cell {
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item: recipe,
+            misc: Misc::None,
+        },
+    );
+    grid.set(
+        output_inserter.0,
+        output_inserter.1,
+        inserter(Direction::East),
+    );
+    grid.set(
+        sink.0,
+        sink.1,
+        Cell {
+            entity: Entity::Sink,
+            item: recipe,
+            ..Default::default()
+        },
+    );
+
+    if !item_reaches_sink(&grid) {
+        return None;
+    }
+    let protected: Vec<usize> = grid
+        .cells
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| matches!(c.entity, Entity::Source | Entity::Sink).then_some(i))
+        .collect();
+    let mut removable = Vec::new();
+    for y in y0..y0 + DIRECT_H {
+        for x in x0..x0 + DIRECT_W {
+            let i = grid.idx(x, y);
+            if !protected.contains(&i) {
+                removable.push(i);
+            }
+        }
+    }
+    Some(Sample {
+        kind: LessonKind::DirectRecipe,
         solution: grid,
         protected,
         removable,
@@ -1691,6 +1818,55 @@ mod tests {
             }
             assert!(ok > 0, "lesson {} never generated", kind.name());
         }
+    }
+
+    /// The real failure report asks for a green circuit from iron plates and
+    /// already-made copper cable. `CIRCUIT_LINE` cannot teach that contract: it
+    /// starts from copper plate and therefore labels a two-assembler chain as
+    /// correct. The direct family must cover the one-machine version as well as
+    /// every other recipe.
+    #[test]
+    fn direct_recipe_covers_every_recipe_and_one_machine_circuits() {
+        let mut recipes = HashSet::new();
+        let mut circuit_cases = 0;
+        for seed in 0..200u64 {
+            let sample = generate(LessonKind::DirectRecipe, Canvas::new(13, 9), seed)
+                .expect("direct recipe must fit the inference canvas");
+            let assemblers: Vec<Cell> = sample
+                .solution
+                .cells
+                .iter()
+                .copied()
+                .filter(|c| c.entity == Entity::Assembler)
+                .collect();
+            assert_eq!(assemblers.len(), 1);
+            recipes.insert(assemblers[0].item as u8);
+            assert!(item_reaches_sink(&sample.solution));
+
+            if assemblers[0].item == Item::GreenCircuit {
+                circuit_cases += 1;
+                let sources: HashSet<u8> = sample
+                    .solution
+                    .cells
+                    .iter()
+                    .filter(|c| c.entity == Entity::Source)
+                    .map(|c| c.item as u8)
+                    .collect();
+                assert_eq!(
+                    sources,
+                    HashSet::from([Item::IronPlate as u8, Item::CopperCable as u8])
+                );
+                assert!(sample.protected.iter().all(|&i| matches!(
+                    sample.solution.cells[i].entity,
+                    Entity::Source | Entity::Sink
+                )));
+            }
+        }
+        assert!(circuit_cases > 0);
+        assert_eq!(
+            recipes,
+            Item::craftable().into_iter().map(|i| i as u8).collect()
+        );
     }
 
     /// An inserter that pushes into an empty tile is decorative, and a factory
