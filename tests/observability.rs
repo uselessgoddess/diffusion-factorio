@@ -24,6 +24,8 @@ fn example_logs() -> Vec<TrainLog> {
             loss: 6.3,
             train_acc: [0.03, 0.05, 0.66, 0.76],
             placement_acc: 0.06,
+            assembler_acc: 0.01,
+            recipe_acc: 0.02,
             t_mean: 0.5,
             nll: 1.2,
             channel_nll: [0.4, 0.3, 0.2, 0.3],
@@ -41,6 +43,8 @@ fn example_logs() -> Vec<TrainLog> {
             loss: 0.76,
             train_acc: [0.91, 0.93, 1.0, 1.0],
             placement_acc: 0.79,
+            assembler_acc: 0.73,
+            recipe_acc: 0.68,
             t_mean: 0.45,
             nll: 0.31,
             channel_nll: [0.1, 0.08, 0.06, 0.07],
@@ -114,6 +118,8 @@ fn metrics_jsonl_is_structured_and_keeps_validation() {
     assert_eq!(rows[1]["samples_seen"], 6400);
     assert_eq!(rows[1]["val"]["functional_rate"], 21.0 / 64.0);
     assert_eq!(rows[1]["val"]["entity_acc"], 0.9);
+    assert_eq!(rows[1]["assembler_recall"], 0.73);
+    assert_eq!(rows[1]["recipe_accuracy"], 0.68);
     fs::remove_file(path).ok();
 }
 
@@ -175,7 +181,8 @@ fn html_report_embeds_parameters_and_metric_charts() {
     assert!(html.contains("scratch_probability"));
     assert!(html.contains("Functional / exact / consistent"));
     assert!(html.contains("Built from scratch"));
-    assert!(html.contains("Placement recall"));
+    assert!(html.contains("Assembler recall"));
+    assert!(html.contains("Recipe accuracy"));
     assert!(html.contains("per-channel NLL"));
     assert!(html.contains("application/json"));
     assert!(!html.contains("https://"), "report must work offline");

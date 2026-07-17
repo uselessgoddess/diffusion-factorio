@@ -19,7 +19,7 @@ use burn::tensor::{Distribution, Int};
 
 use crate::data::GridBatch;
 use crate::model::Denoiser;
-use crate::world::{N_CHANNELS, VOCAB};
+use crate::world::{Entity, N_CHANNELS, VOCAB};
 
 #[derive(Config, Debug)]
 pub struct DiffusionConfig {
@@ -63,6 +63,13 @@ pub struct StepStats {
     pub placement_correct: f64,
     /// Masked cells whose target entity is non-empty (denominator above).
     pub placement_total: f64,
+    /// Correct entity predictions specifically on assembler anchors.
+    pub assembler_correct: f64,
+    /// Masked assembler anchors (denominator for assembler recall and recipe
+    /// accuracy).
+    pub assembler_total: f64,
+    /// Correct item/recipe predictions on masked assembler anchors.
+    pub recipe_correct: f64,
     /// Mean masking rate `t` this step.
     pub t_mean: f64,
     /// Mean per-cell NLL over masked cells (unweighted).
@@ -83,6 +90,20 @@ impl StepStats {
     pub fn placement_acc(&self) -> f64 {
         if self.placement_total > 0.0 {
             self.placement_correct / self.placement_total
+        } else {
+            0.0
+        }
+    }
+    pub fn assembler_acc(&self) -> f64 {
+        if self.assembler_total > 0.0 {
+            self.assembler_correct / self.assembler_total
+        } else {
+            0.0
+        }
+    }
+    pub fn recipe_acc(&self) -> f64 {
+        if self.assembler_total > 0.0 {
+            self.recipe_correct / self.assembler_total
         } else {
             0.0
         }
@@ -171,6 +192,11 @@ pub fn loss<B: Backend>(
         .slice([0..n, 0..1, 0..h, 0..w])
         .reshape([n, h, w]);
     let non_empty = entity_target.clone().greater_elem(0).float(); // [n,h,w] in {0,1}
+    let assembler = entity_target
+        .clone()
+        .equal_elem(Entity::Assembler as i32)
+        .float();
+    let assembler_mask = assembler.mul(mask.clone());
     let weight = non_empty
         .clone()
         .mul_scalar(cfg.structure_weight - 1.0)
@@ -203,8 +229,14 @@ pub fn loss<B: Backend>(
         if c == 0 {
             // Placement recall: entity hits on masked, non-empty target cells.
             let placement_mask = non_empty.clone().mul(mask.clone());
-            stats.placement_correct = scalar(hit.mul(placement_mask.clone()).sum());
+            stats.placement_correct = scalar(hit.clone().mul(placement_mask.clone()).sum());
             stats.placement_total = scalar(placement_mask.sum());
+            stats.assembler_correct = scalar(hit.mul(assembler_mask.clone()).sum());
+            stats.assembler_total = scalar(assembler_mask.clone().sum());
+        } else if c == 2 {
+            // The item channel on an assembler is its recipe. Accuracy over all
+            // item cells is mostly `None` and concealed the recipe blind spot.
+            stats.recipe_correct = scalar(hit.mul(assembler_mask.clone()).sum());
         }
         let channel_nll = scalar(raw_nll.mul(mask.clone()).sum());
         stats.channel_nll[c] = channel_nll;

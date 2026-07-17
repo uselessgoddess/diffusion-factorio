@@ -101,6 +101,10 @@ pub struct TrainLog {
     /// Entity placement recall (accuracy on masked non-empty cells) — the honest
     /// "is it learning to build?" signal, immune to the empty-cell majority.
     pub placement_acc: f64,
+    /// Entity accuracy restricted to masked assembler anchors.
+    pub assembler_acc: f64,
+    /// Item/recipe accuracy restricted to masked assembler anchors.
+    pub recipe_acc: f64,
     /// Mean sampled diffusion time (masking rate) for the batch.
     pub t_mean: f64,
     /// Unweighted negative log-likelihood on masked cells.
@@ -202,17 +206,21 @@ where
         };
 
         let placement_acc = stats.placement_acc();
+        let assembler_acc = stats.assembler_acc();
+        let recipe_acc = stats.recipe_acc();
         let elapsed_seconds = started.elapsed().as_secs_f64();
         let samples_seen = (step + 1) * cfg.batch_size;
         let samples_per_second = samples_seen as f64 / elapsed_seconds.max(f64::EPSILON);
         if is_val || step == 0 {
             let mut line = format!(
-                "step {:>5}/{} | lr {:.2e} | loss {:.4} | place {:.2} | acc[E={:.2} D={:.2} I={:.2} M={:.2}]",
+                "step {:>5}/{} | lr {:.2e} | loss {:.4} | place {:.2} asm {:.2} recipe {:.2} | acc[E={:.2} D={:.2} I={:.2} M={:.2}]",
                 step + 1,
                 cfg.steps,
                 lr,
                 loss_v,
                 placement_acc,
+                assembler_acc,
+                recipe_acc,
                 train_acc[0],
                 train_acc[1],
                 train_acc[2],
@@ -240,6 +248,8 @@ where
             loss: loss_v,
             train_acc,
             placement_acc,
+            assembler_acc,
+            recipe_acc,
             t_mean: stats.t_mean,
             nll: stats.nll,
             channel_nll: stats.channel_nll,
