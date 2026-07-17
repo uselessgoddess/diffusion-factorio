@@ -310,8 +310,12 @@ fn draw_sample(canvas: Canvas, rng: &mut ChaCha8Rng, seed_ctr: &mut u64) -> Samp
     }
 }
 
-/// A training batch: solution grids + `observed` masks (the protected scaffold is
-/// always visible; the diffusion process masks a random subset of the rest).
+/// A training batch: solution grids + task-only `observed` masks.
+///
+/// Training uses the same source/sink conditioning as scratch validation. The
+/// lesson's `protected` list belongs to partial-inpainting data generation; it
+/// may include answer cells such as an assembler recipe and must not become the
+/// task conditioning mask.
 fn train_batch(
     canvas: Canvas,
     batch: usize,
@@ -322,9 +326,7 @@ fn train_batch(
     let mut observed = Vec::with_capacity(batch);
     for _ in 0..batch {
         let s = draw_sample(canvas, rng, seed_ctr);
-        let obs: Vec<bool> = (0..s.solution.len())
-            .map(|i| s.protected.contains(&i))
-            .collect();
+        let (_, obs) = s.blank_to_scaffold();
         grids.push(s.solution);
         observed.push(obs);
     }
@@ -594,5 +596,35 @@ mod tests {
         assert!(grids
             .iter()
             .all(|g| (g.width, g.height) == (canvas.width, canvas.height)));
+    }
+
+    /// Scratch validation removes every machine, so the training objective must
+    /// also ask the denoiser to predict machines. Historically the two basic
+    /// assembler lessons put their assembler anchor in `protected`; using that
+    /// list as the observed mask gave the recipe cell exactly zero loss while
+    /// validation expected the model to invent it from source/sink anchors.
+    #[test]
+    fn training_batches_do_not_reveal_assembler_answers() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut seed_ctr = 0;
+        let (grids, observed) = train_batch(Canvas::new(13, 9), 128, &mut rng, &mut seed_ctr);
+
+        let mut assemblers = 0;
+        for (grid, mask) in grids.iter().zip(&observed) {
+            for (i, cell) in grid.cells.iter().enumerate() {
+                if cell.entity == crate::world::Entity::Assembler {
+                    assemblers += 1;
+                    assert!(
+                        !mask[i],
+                        "training revealed assembler recipe {:?} at cell {i}",
+                        cell.item
+                    );
+                }
+            }
+        }
+        assert!(
+            assemblers > 0,
+            "deterministic batch did not exercise a machine lesson"
+        );
     }
 }
