@@ -48,11 +48,11 @@ pub struct DiffusionConfig {
     /// bottleneck — see `docs/ROADMAP.md`. `1.0` disables the reweighting.
     #[config(default = 8.0)]
     pub structure_weight: f64,
-    /// Additional loss multiplier for an assembler anchor, after the general
-    /// non-empty-cell weight. One machine/recipe cell otherwise competes with
-    /// every belt and inserter in the layout despite carrying the task's
-    /// critical crafting decision.
-    #[config(default = 8.0)]
+    /// Experimental loss multiplier for an assembler anchor, after the general
+    /// non-empty-cell weight. `1.0` is deliberately neutral: weighting cannot
+    /// repair a machine target chosen independently of the visible task, and
+    /// amplifying that label noise harms the routing lessons.
+    #[config(default = 1.0)]
     pub assembler_weight: f64,
 }
 
@@ -315,7 +315,7 @@ mod tests {
             .convert::<f32>()
             .into_vec()
             .unwrap();
-        assert_eq!(values, vec![1.0, 8.0, 64.0]);
+        assert_eq!(values, vec![1.0, 8.0, 8.0]);
     }
 
     #[test]

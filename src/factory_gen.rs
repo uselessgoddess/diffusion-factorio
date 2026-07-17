@@ -329,6 +329,35 @@ fn manhattan(a: (usize, usize), b: (usize, usize)) -> usize {
     a.0.abs_diff(b.0) + a.1.abs_diff(b.1)
 }
 
+/// Pick the one assembler location implied by a visible chaos task.
+///
+/// The source, sink and obstacles are the model's conditioning. Choosing the
+/// machine with fresh randomness after those are fixed would make its location
+/// an unobservable label: the same task could demand any free 3x3 footprint.
+/// Prefer the free footprint whose centre minimizes the total source-to-sink
+/// detour, with coordinates breaking ties, so the answer is both useful and a
+/// deterministic function of what the model sees.
+fn canonical_assembler_anchor(
+    task: &Grid,
+    source: (usize, usize),
+    sink: (usize, usize),
+) -> Option<(usize, usize)> {
+    if task.width < 3 || task.height < 3 {
+        return None;
+    }
+    (0..=task.height - 3)
+        .flat_map(|y| (0..=task.width - 3).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            (x..x + 3).all(|tx| {
+                (y..y + 3).all(|ty| !task.is_obstacle(tx, ty) && task.anchor_at(tx, ty).is_none())
+            })
+        })
+        .min_by_key(|&(x, y)| {
+            let centre = (x + 1, y + 1);
+            (manhattan(source, centre) + manhattan(centre, sink), y, x)
+        })
+}
+
 /// BFS shortest path over free cells (4-connected), avoiding obstacles and
 /// occupied cells. `start` and `goal` are always passable endpoints. Returns the
 /// path including both endpoints, or `None`.
@@ -763,103 +792,12 @@ fn gen_assembler_chaos(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
     let recipe = *Item::single_input_craftable().choose(rng).unwrap();
     let input_item = recipe.ingredients()[0].item;
 
-    // The machine, wherever its nine tiles happen to be free.
-    let (ax, ay) = (
-        rng.gen_range(0..=(canvas.width - 3)),
-        rng.gen_range(0..=(canvas.height - 3)),
-    );
-    if (ax..ax + 3).any(|x| (ay..ay + 3).any(|y| grid.is_obstacle(x, y))) {
-        return None;
-    }
-    grid.set(
-        ax,
-        ay,
-        Cell {
-            entity: Entity::Assembler,
-            direction: Direction::East,
-            item: recipe,
-            misc: Misc::None,
-        },
-    );
-
-    // Two distinct free faces: one to load, one to unload. `perimeter` is in
-    // anchor coordinates and already excludes the footprint itself. A corner of
-    // the ring touches the machine only diagonally and no inserter can reach it,
-    // so `dir_toward_footprint` rejects it here rather than three checks later.
-    let mut faces: Vec<(usize, usize)> = grid
-        .perimeter(ax, ay)
-        .into_iter()
-        .filter(|&(x, y)| !grid.is_obstacle(x, y) && grid.anchor_at(x, y).is_none())
-        .filter(|&f| dir_toward_footprint(&grid, f, (ax, ay)).is_some())
-        .collect();
-    faces.shuffle(rng);
-    let (&load, &unload) = (faces.first()?, faces.get(1)?);
-
-    // Every other face is off limits to the router. A machine offers its output
-    // to its whole perimeter (`sim::flow_targets`), so a belt merely *passing* a
-    // face picks the output up -- and when that belt is the inbound one, the
-    // gears ride it back to the loading inserter and into the machine that made
-    // them. `item_reaches_sink` still says yes (the sink is reachable), but the
-    // graded simulator has to topologically sort a cycle and scores the factory
-    // zero. Factorio agrees for its own reason: an assembler will not feed an
-    // adjacent belt, and a layout that needs it to is not buildable.
-    let keep_clear: Vec<(usize, usize)> = faces
-        .iter()
-        .copied()
-        .filter(|&f| f != load && f != unload)
-        .collect();
-
-    // An inserter reaches exactly one tile behind it and drops exactly one tile
-    // ahead (`throughput::accepts_from`). So the belts are *not* free to meet an
-    // inserter at whichever face the router likes: machine, inserter and belt
-    // have to be colinear. The loader faces the machine and therefore takes from
-    // `pickup`, directly behind it; the unloader faces away and puts down on
-    // `drop`, directly in front. Those two cells are where the routes must end
-    // and begin -- not `load` and `unload` themselves.
-    //
-    // Getting this wrong is what the first draft did, and neither simulator
-    // objected loudly. `item_reaches_sink` only asks whether the sink is
-    // reachable, and it was: the outbound belt started on the machine's
-    // perimeter, so the machine fed it directly and the unloading inserter --
-    // aimed at whatever face BFS happened to leave by, picking up from empty
-    // ground behind it -- was scenery. Only the graded metric noticed, by
-    // scoring the whole factory zero.
-    let into_machine = dir_toward_footprint(&grid, load, (ax, ay))?;
-    let away = dir_toward_footprint(&grid, unload, (ax, ay))?.opposite();
-    let pickup = step(load, into_machine.opposite(), canvas)?;
-    let drop = step(unload, away, canvas)?;
-
+    // Pose the visible task first. Everything below this point is a
+    // deterministic solver: varied tasks still produce varied layouts, but the
+    // target no longer contains hidden RNG choices the denoiser cannot infer.
     let source = random_cell(canvas, rng);
     let sink = random_cell(canvas, rng);
-    for &c in &[source, sink, pickup, drop] {
-        if grid.is_obstacle(c.0, c.1) || grid.anchor_at(c.0, c.1).is_some() {
-            return None;
-        }
-        // Nor may any of them sit on a face: a sink touching the machine is fed
-        // without ever needing the inserter, and a belt touching it is handed
-        // the machine's output for free.
-        if keep_clear.contains(&c) {
-            return None;
-        }
-    }
-    // A source is an *unlimited* supply, and like a machine it offers to every
-    // neighbour rather than to the one belt it was drawn for. Where a machine's
-    // stray offer makes a cycle, a source's quietly poisons: `throughput` seeds
-    // it with `f64::INFINITY`, and `clamp_total` hands an unlimited supply the
-    // whole belt and crowds every finite one off it. So a plate source touching
-    // the gear line does not add plates to it -- it *replaces* the gears, the
-    // sink filters the plates out as the wrong item, and a factory whose every
-    // belt is correct delivers zero. It cost a quarter of this family before
-    // `experiments/why_zero.rs` pinned it down.
-    //
-    // The rest of the gear line is routed around the source below. `drop` is
-    // placed before either route runs and so has to be rejected here instead.
-    if neighbours(source, canvas).contains(&drop) {
-        return None;
-    }
-    // Everything downstream assumes these six cells are six cells.
-    let named = [source, sink, load, unload, pickup, drop];
-    if (0..named.len()).any(|i| named[i + 1..].contains(&named[i])) {
+    if source == sink || grid.is_obstacle(source.0, source.1) || grid.is_obstacle(sink.0, sink.1) {
         return None;
     }
     grid.set(
@@ -880,69 +818,153 @@ fn gen_assembler_chaos(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
             ..Default::default()
         },
     );
+
+    // The shortest useful free footprint is now implied by the task, rather
+    // than sampled independently of it.
+    let (ax, ay) = canonical_assembler_anchor(&grid, source, sink)?;
     grid.set(
-        load.0,
-        load.1,
+        ax,
+        ay,
         Cell {
-            entity: Entity::Inserter,
-            direction: into_machine,
-            ..Default::default()
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item: recipe,
+            misc: Misc::None,
         },
     );
-    grid.set(
-        unload.0,
-        unload.1,
-        Cell {
-            entity: Entity::Inserter,
-            direction: away,
-            ..Default::default()
-        },
-    );
-    // The two belts the inserters actually touch, placed before either route so
-    // the router cannot lay a belt across them and have it overwritten. `pickup`
-    // hands the loader its plates, so it points at it. `drop` is where the
-    // unloader puts the gears down, and which way it carries them on is up to
-    // the route -- fixed below.
-    grid.set(pickup.0, pickup.1, Cell::belt(into_machine));
-    grid.set(drop.0, drop.1, Cell::belt(away));
 
-    // Route in, then out. The second route runs on a grid that already holds the
-    // first one's belts, so the two cannot claim the same cell.
-    let mut removable = vec![
-        grid.idx(load.0, load.1),
-        grid.idx(unload.0, unload.1),
-        grid.idx(pickup.0, pickup.1),
-        grid.idx(drop.0, drop.1),
-    ];
-    let (inbound, _) = belt_run(&mut grid, source, pickup, &keep_clear)?;
-    removable.extend(inbound);
-    // The outbound route carries gears and so has one more cell to stay off than
-    // the inbound one, which carries what the source is already full of: the
-    // source's own neighbours. Only the outbound route needs this. A plate belt
-    // brushing the plate source picks up more of what it is already carrying,
-    // which is harmless -- the crowding-out only bites when the items differ.
-    let mut gear_keep_clear = keep_clear.clone();
-    gear_keep_clear.extend(neighbours(source, canvas));
-    let (outbound, out_dir) = belt_run(&mut grid, drop, sink, &gear_keep_clear)?;
-    removable.extend(outbound);
-    grid.set(drop.0, drop.1, Cell::belt(out_dir));
-
-    if !item_reaches_sink(&grid) {
+    // A port directly touching the machine would bypass one of the inserters
+    // and change the task's production graph.
+    let perimeter = grid.perimeter(ax, ay);
+    if perimeter.contains(&source) || perimeter.contains(&sink) {
         return None;
     }
-    // Partial inpainting preserves the machine location. Task-conditioned
-    // training uses only the source and sink and must predict it too.
-    let protected = vec![
-        grid.idx(source.0, source.1),
-        grid.idx(sink.0, sink.1),
-        grid.idx(ax, ay),
-    ];
-    Some(Sample {
-        kind: LessonKind::AssemblerChaos,
-        solution: grid,
-        protected,
-        removable,
-    })
+
+    // Two distinct free faces: one to load, one to unload. `perimeter` is in
+    // anchor coordinates and already excludes the footprint itself. A corner of
+    // the ring touches the machine only diagonally and no inserter can reach it,
+    // so `dir_toward_footprint` rejects it here rather than three checks later.
+    let faces: Vec<(usize, usize)> = perimeter
+        .into_iter()
+        .filter(|&(x, y)| !grid.is_obstacle(x, y) && grid.anchor_at(x, y).is_none())
+        .filter(|&f| dir_toward_footprint(&grid, f, (ax, ay)).is_some())
+        .collect();
+
+    // Enumerate the machine's input/output faces deterministically, preferring
+    // the shortest combined route. Trying alternatives is still deterministic;
+    // it only handles a blocked first choice.
+    let mut pairs = Vec::new();
+    for &load in &faces {
+        let Some(into_machine) = dir_toward_footprint(&grid, load, (ax, ay)) else {
+            continue;
+        };
+        let Some(pickup) = step(load, into_machine.opposite(), canvas) else {
+            continue;
+        };
+        for &unload in &faces {
+            if unload == load {
+                continue;
+            }
+            let Some(away) = dir_toward_footprint(&grid, unload, (ax, ay)).map(Direction::opposite)
+            else {
+                continue;
+            };
+            let Some(drop) = step(unload, away, canvas) else {
+                continue;
+            };
+            pairs.push((load, unload, into_machine, away, pickup, drop));
+        }
+    }
+    pairs.sort_by_key(|&(load, unload, _, _, pickup, drop)| {
+        (
+            manhattan(source, pickup) + manhattan(drop, sink),
+            load.1,
+            load.0,
+            unload.1,
+            unload.0,
+        )
+    });
+
+    for (load, unload, into_machine, away, pickup, drop) in pairs {
+        let mut candidate = grid.clone();
+        let keep_clear: Vec<(usize, usize)> = faces
+            .iter()
+            .copied()
+            .filter(|&f| f != load && f != unload)
+            .collect();
+
+        if [pickup, drop]
+            .into_iter()
+            .any(|c| candidate.is_obstacle(c.0, c.1) || candidate.anchor_at(c.0, c.1).is_some())
+            || neighbours(source, canvas).contains(&drop)
+        {
+            continue;
+        }
+        let named = [source, sink, load, unload, pickup, drop];
+        if (0..named.len()).any(|i| named[i + 1..].contains(&named[i])) {
+            continue;
+        }
+
+        candidate.set(
+            load.0,
+            load.1,
+            Cell {
+                entity: Entity::Inserter,
+                direction: into_machine,
+                ..Default::default()
+            },
+        );
+        candidate.set(
+            unload.0,
+            unload.1,
+            Cell {
+                entity: Entity::Inserter,
+                direction: away,
+                ..Default::default()
+            },
+        );
+        candidate.set(pickup.0, pickup.1, Cell::belt(into_machine));
+        candidate.set(drop.0, drop.1, Cell::belt(away));
+
+        let mut removable = vec![
+            candidate.idx(load.0, load.1),
+            candidate.idx(unload.0, unload.1),
+            candidate.idx(pickup.0, pickup.1),
+            candidate.idx(drop.0, drop.1),
+        ];
+        let Some((inbound, _)) = belt_run(&mut candidate, source, pickup, &keep_clear) else {
+            continue;
+        };
+        removable.extend(inbound);
+
+        // The output route must not brush the unlimited input source: doing so
+        // replaces the finite crafted output in the throughput simulation.
+        let mut gear_keep_clear = keep_clear;
+        gear_keep_clear.extend(neighbours(source, canvas));
+        let Some((outbound, out_dir)) = belt_run(&mut candidate, drop, sink, &gear_keep_clear)
+        else {
+            continue;
+        };
+        removable.extend(outbound);
+        candidate.set(drop.0, drop.1, Cell::belt(out_dir));
+
+        if !item_reaches_sink(&candidate) {
+            continue;
+        }
+        let protected = vec![
+            candidate.idx(source.0, source.1),
+            candidate.idx(sink.0, sink.1),
+            candidate.idx(ax, ay),
+        ];
+        return Some(Sample {
+            kind: LessonKind::AssemblerChaos,
+            solution: candidate,
+            protected,
+            removable,
+        });
+    }
+
+    None
 }
 
 /// The up-to-four cells orthogonally adjacent to `pos` and still on the board.
@@ -1979,6 +2001,48 @@ mod tests {
             "ASSEMBLER_CHAOS gave only {chaos} distinct answers in 200 seeds; it is \
              stamping a template again"
         );
+    }
+
+    #[test]
+    fn assembler_chaos_machine_is_determined_by_the_visible_task() {
+        for canvas in Canvas::pool(DEFAULT_CANVAS_MIN, DEFAULT_CANVAS_MAX) {
+            for seed in 0..4u64 {
+                let sample = generate(LessonKind::AssemblerChaos, canvas, seed)
+                    .expect("chaos task should generate");
+                let (task, _) = sample.blank_to_scaffold();
+                let source = sample
+                    .solution
+                    .cells
+                    .iter()
+                    .position(|c| c.entity == Entity::Source)
+                    .map(|i| (i % sample.solution.width, i / sample.solution.width))
+                    .unwrap();
+                let sink = sample
+                    .solution
+                    .cells
+                    .iter()
+                    .position(|c| c.entity == Entity::Sink)
+                    .map(|i| (i % sample.solution.width, i / sample.solution.width))
+                    .unwrap();
+                let actual = sample
+                    .solution
+                    .cells
+                    .iter()
+                    .position(|c| c.entity == Entity::Assembler)
+                    .map(|i| (i % sample.solution.width, i / sample.solution.width))
+                    .unwrap();
+
+                assert_eq!(
+                    actual,
+                    canonical_assembler_anchor(&task, source, sink).unwrap(),
+                    "{canvas} seed {seed} teaches a hidden random machine location"
+                );
+                assert!(
+                    throughput::score(&sample.solution) > 0.0,
+                    "{canvas} seed {seed} routes but delivers nothing"
+                );
+            }
+        }
     }
 
     #[test]

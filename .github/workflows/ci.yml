@@ -58,53 +58,40 @@ jobs:
             --ckpt /tmp/ci-ckpt/denoiser --show 2 --eval 128 \
             | tee sample.log
 
-  # Once assembler answers participate in the loss, does giving their single
-  # recipe-bearing anchor enough weight fix the remaining sparse-machine
-  # failure measured by the first objective A/B?
-  #
-  # Both arms use task-only conditioning, exact t=1 examples, the same seed,
-  # mixed-shape curriculum, direct-recipe family and architecture. Only the
-  # dedicated assembler multiplier changes. Unit tests prove the weight
-  # mechanics; this slower run tests what weights learn from them.
-  #
+  # Full task-conditioned objective check. This uses the same seed and model as
+  # the archived random-target control run, so per-lesson scratch metrics show
+  # whether making ASSEMBLER_CHAOS a function of its visible task actually
+  # teaches the missing machine behavior.
   objective:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arm: task-unweighted
-            flags: --assembler-weight 1
-          - arm: task-weighted
-            flags: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: train (${{ matrix.arm }})
+      - name: train (deterministic task target)
         run: |
           mkdir -p runs
-          cargo run --release --bin train -- ${{ matrix.flags }} \
+          cargo run --release --bin train -- \
             --steps 3000 --batch 16 --hidden 32 --blocks 4 \
             --val-every 500 --val-batch 128 \
-            --out /tmp/ckpt-${{ matrix.arm }}/denoiser \
-            --metrics-out runs/${{ matrix.arm }}-metrics.jsonl \
-            --report-out runs/${{ matrix.arm }}-report.html \
-            | tee runs/${{ matrix.arm }}-train.log
+            --out /tmp/ckpt-deterministic/denoiser \
+            --metrics-out runs/deterministic-metrics.jsonl \
+            --report-out runs/deterministic-report.html \
+            | tee runs/deterministic-train.log
       - name: summarize scratch performance by lesson
         run: |
           node -e '
             const fs=require("fs");
             const rows=fs.readFileSync(process.argv[1],"utf8").trim().split("\n").map(JSON.parse);
             const last=[...rows].reverse().find(r=>r.val_scratch);
-            console.log(`## objective: ${{ matrix.arm }}`);
+            console.log("## objective: deterministic task target");
             console.log(`aggregate functional: ${last.val_scratch.functional_rate.toFixed(3)}`);
             for (const [name,value] of Object.entries(last.val_scratch_by_lesson))
               console.log(`${name}: functional=${value.functional_rate.toFixed(3)} throughput=${value.throughput.toFixed(3)}`);
-          ' runs/${{ matrix.arm }}-metrics.jsonl | tee -a "$GITHUB_STEP_SUMMARY"
+          ' runs/deterministic-metrics.jsonl | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: objective-${{ matrix.arm }}
+          name: objective-deterministic
           path: runs/

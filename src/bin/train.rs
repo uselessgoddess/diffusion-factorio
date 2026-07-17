@@ -70,8 +70,8 @@ struct Args {
     /// Extra loss weight for non-empty cells (prevents empty collapse).
     #[arg(long, default_value_t = 8.0)]
     structure_weight: f64,
-    /// Extra loss weight for assembler anchors after the structure weight.
-    #[arg(long, default_value_t = 8.0)]
+    /// Experimental extra assembler-anchor weight (1 keeps it neutral).
+    #[arg(long, default_value_t = 1.0)]
     assembler_weight: f64,
     #[arg(long, default_value_t = 0)]
     seed: u64,
