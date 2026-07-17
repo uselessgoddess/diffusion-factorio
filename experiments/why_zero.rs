@@ -16,7 +16,7 @@
 //! ```
 
 use diffusion_factorio::{
-    factory_gen::{generate, LessonKind},
+    factory_gen::{generate, Canvas, LessonKind},
     sim, textual,
     throughput::throughput,
     world::{Entity, Grid},
@@ -63,7 +63,7 @@ fn main() {
         let mut zeros = 0usize;
         let mut total = 0usize;
         for seed in 0..200u64 {
-            let Some(s) = generate(kind, 11, seed) else {
+            let Some(s) = generate(kind, Canvas::square(11), seed) else {
                 continue;
             };
             total += 1;

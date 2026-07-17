@@ -50,6 +50,9 @@ each validation step reconstructs those same known-good factories and reports:
 - **`place` — placement recall**: entity accuracy on masked *non-empty* cells.
   The honest signal, immune to the empty-cell majority. If loss drops but `place`
   stays near 0, the model has collapsed to "predict empty".
+- **`asm` and `recipe`**: assembler-anchor recall and recipe accuracy only on
+  assembler targets. These prevent belts and the `Item::None` majority from
+  concealing a model that never learned to place or configure a machine.
 - **`functional`**: fraction of *reconstructed* factories where the **right item**
   reaches a sink, checked by the simulator (`src/sim.rs`). The number that matters.
 - **`exact`**, **`consistent`**, and per-channel accuracy `[E, D, I, M]`.
@@ -95,6 +98,10 @@ cargo run --release --features wgpu --bin train -- --steps 50000 --out checkpoin
 
 # Validatable inference: blank known factories, reconstruct, and score
 cargo run --release --bin sample -- --ckpt checkpoints/denoiser --show 4 --eval 256
+
+# Hard design check: source/sink-only conditioning for one lesson family
+cargo run --release --bin sample -- --ckpt checkpoints/denoiser \
+  --scratch --lesson ASSEMBLER_CHAOS --size 13 --height 9 --eval 128
 
 # Also export the first reconstruction to Factorio's import-string format
 cargo run --release --bin sample -- --ckpt checkpoints/denoiser \
@@ -171,6 +178,9 @@ for the mapping and current simulation-parity limits.
   and why RL is still not next.
 - [`docs/TRAINING_ANALYSIS.md`](docs/TRAINING_ANALYSIS.md) — what the first
   converged GPU run does and does not prove, with re-derivable numbers.
+- [`docs/GENERALIZATION.md`](docs/GENERALIZATION.md) — why a 10,000-step run that
+  reads `loss 0.1079 / acc 0.98` still builds factories that deliver nothing, and
+  which of the five causes were the model's fault (none of the first four).
 - [`docs/ANALYSIS.md`](docs/ANALYSIS.md) — reference analysis: what to borrow, what to reject.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the masked-diffusion design in detail.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — bottlenecks (ranked) and next steps.

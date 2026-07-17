@@ -24,6 +24,8 @@ fn example_logs() -> Vec<TrainLog> {
             loss: 6.3,
             train_acc: [0.03, 0.05, 0.66, 0.76],
             placement_acc: 0.06,
+            assembler_acc: 0.01,
+            recipe_acc: 0.02,
             t_mean: 0.5,
             nll: 1.2,
             channel_nll: [0.4, 0.3, 0.2, 0.3],
@@ -41,6 +43,8 @@ fn example_logs() -> Vec<TrainLog> {
             loss: 0.76,
             train_acc: [0.91, 0.93, 1.0, 1.0],
             placement_acc: 0.79,
+            assembler_acc: 0.73,
+            recipe_acc: 0.68,
             t_mean: 0.45,
             nll: 0.31,
             channel_nll: [0.1, 0.08, 0.06, 0.07],
@@ -60,6 +64,7 @@ fn example_logs() -> Vec<TrainLog> {
                 throughput_ratio: 16.0,
                 gradeable: 64,
                 beat_original: 1,
+                ..Default::default()
             }),
             val_by_lesson: Default::default(),
             // From scratch the whole factory is masked, so far more cells are
@@ -77,6 +82,7 @@ fn example_logs() -> Vec<TrainLog> {
                 throughput_ratio: 3.0,
                 gradeable: 64,
                 beat_original: 0,
+                ..Default::default()
             }),
             val_scratch_by_lesson: BTreeMap::from([(
                 "move_one_item".to_owned(),
@@ -93,6 +99,7 @@ fn example_logs() -> Vec<TrainLog> {
                     throughput_ratio: 2.4,
                     gradeable: 16,
                     beat_original: 0,
+                    ..Default::default()
                 },
             )]),
         },
@@ -114,6 +121,10 @@ fn metrics_jsonl_is_structured_and_keeps_validation() {
     assert_eq!(rows[1]["samples_seen"], 6400);
     assert_eq!(rows[1]["val"]["functional_rate"], 21.0 / 64.0);
     assert_eq!(rows[1]["val"]["entity_acc"], 0.9);
+    assert!(rows[1]["val"].get("assembler_recall").is_some());
+    assert!(rows[1]["val"].get("belt_direction_accuracy").is_some());
+    assert_eq!(rows[1]["assembler_recall"], 0.73);
+    assert_eq!(rows[1]["recipe_accuracy"], 0.68);
     fs::remove_file(path).ok();
 }
 
@@ -149,12 +160,14 @@ fn html_report_embeds_parameters_and_metric_charts() {
     let path = temp_file("training-report.html");
     let metadata = RunMetadata {
         backend: "ndarray (CPU)".into(),
-        grid_size: 11,
+        canvases: "11x11".to_owned(),
         steps: 200,
         batch_size: 32,
         val_batch: 64,
         sample_steps: 12,
         seed: 7,
+        legacy_protected_scaffold: false,
+        include_assembler_open: true,
         peak_lr: 3e-4,
         warmup_steps: 100,
         grad_clip: 1.0,
@@ -164,16 +177,21 @@ fn html_report_embeds_parameters_and_metric_charts() {
         time_dim: 64,
         elbo_weight: false,
         t_min: 0.02,
+        scratch_probability: 0.25,
         structure_weight: 8.0,
+        assembler_weight: 8.0,
     };
     write_training_report(&path, &metadata, &example_logs()).unwrap();
     let html = fs::read_to_string(&path).unwrap();
 
     assert!(html.contains("Training report"));
     assert!(html.contains("structure_weight"));
+    assert!(html.contains("assembler_weight"));
+    assert!(html.contains("scratch_probability"));
     assert!(html.contains("Functional / exact / consistent"));
     assert!(html.contains("Built from scratch"));
-    assert!(html.contains("Placement recall"));
+    assert!(html.contains("Assembler recall"));
+    assert!(html.contains("Recipe accuracy"));
     assert!(html.contains("per-channel NLL"));
     assert!(html.contains("application/json"));
     assert!(!html.contains("https://"), "report must work offline");

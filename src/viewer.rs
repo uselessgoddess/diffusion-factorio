@@ -221,7 +221,7 @@ fn entity_svg(grid: &Grid, x: usize, y: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factory_gen::{generate, LessonKind};
+    use crate::factory_gen::{generate, Canvas, LessonKind};
     use crate::world::Cell;
 
     fn assembler_grid() -> Grid {
@@ -306,7 +306,7 @@ mod tests {
         let mut drawn = 0;
         for &kind in LessonKind::all() {
             for seed in 0..8 {
-                let Some(sample) = generate(kind, 11, seed) else {
+                let Some(sample) = generate(kind, Canvas::square(11), seed) else {
                     continue;
                 };
                 drawn += 1;

@@ -381,14 +381,18 @@ the server takes a hand-painted task rather than a lesson id.
 What is *not* proven, and what I would measure before building any mod:
 
 1. **Size generalization has never been tested.** The denoiser is fully
-   convolutional and mean-pools for global context, so **variable sizes are
+   convolutional and mean+max-pools for global context, so **variable sizes are
    already free and nobody has measured them**. `--size` exists on all three
    binaries. **Train at 11, sample at 15 — that experiment costs one command and
    has never been run.** Do it before designing a UI around arbitrary areas.
+   *(Since answered: `experiments/grid_shape` ran it, the trained shape scored
+   6.5× the issue's shape at matched area, and the curriculum now draws every
+   width × height in 9..=15 rather than one square — see cause 5 in
+   `docs/GENERALIZATION.md`. `--size` on `train` is now the square-only control.)*
 2. **The receptive field is a hard limit and it is computable.** ±1 at the stem,
    ±2 per block; at `--blocks 6` a cell sees ±13 — a 27×27 window. Beyond that,
-   routing depends entirely on the mean-pooled global vector, and **mean-pooling
-   a 30×30 board into one vector is a very coarse summary to route a bus with.**
+   routing depends entirely on the pooled global vector. Mean+max retains sparse
+   cues better, but **summarizing a 30×30 board in one vector is still coarse.**
    Expect size generalization to break here first. If a player selects a 40×40
    area, this is what will bite, and the fix is architectural (multi-scale U-Net,
    or axial attention), not more steps.
@@ -433,9 +437,17 @@ offsets, not lessons. **The room was never the constraint.**
 The control that shows what does work is `MOVE_ONE_ITEM_CHAOS` and now
 `ASSEMBLER_CHAOS`: they do not stamp a template, they scatter obstacles into the
 conditioning plane and derive the answer by BFS *through* them. `ASSEMBLER_CHAOS`
-scores **197,228 distinct answers from 200,000 seeds** against `ASSEMBLER_LINE`'s
-1. A 5,000-step run sees each task ~0.1× instead of ~254×: the model cannot meet
-the same task twice, which is the point.
+produces **more than 150 task-conditioned answers in 200 seeds** against
+`ASSEMBLER_LINE`'s 2. Its visible source, sink, recipe, and obstacles are created
+first; a deterministic solver then derives the machine pose and routes. An older
+197,228 / 200,000 count included hidden random machine choices, which were label
+noise rather than inferable diversity.
+
+The same census also exposed a curriculum discontinuity: there was no varied
+one-machine family between `ASSEMBLER_LINE`'s two answers and obstacle routing.
+`ASSEMBLER_OPEN` now reuses the deterministic solver without obstacles (4,900
+tasks and 672 answer shapes at size 11), isolating machine placement plus two
+connected routes before `ASSEMBLER_CHAOS` adds terrain.
 
 **The recipe is known and it is not RL: randomize the world, derive the label by
 search rather than stamping it.** `UNDERGROUND_CROSS`, `ASSEMBLER_BANK` and

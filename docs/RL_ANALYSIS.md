@@ -515,7 +515,7 @@ stays terminal-only.
 denoiser is *fully convolutional*: a 3×3 stem, residual blocks of two 3×3 convs,
 and 1×1 conv output heads. Every `Linear` in it acts on the **channel**
 dimension (`hidden → hidden`), never on a flattened board —
-`ResBlock::forward` mean-pools over the spatial dims to build its global vector
+`ResBlock::forward` pools mean and max over the spatial dims to build its global vector
 (`src/model.rs:154-165`), which is a reduction, not a fixed-size reshape. So the
 network accepts any H×W, and `sample --size N` already exists. **Train at 11,
 sample at 15 — that experiment costs one command and has never been run.**
@@ -524,9 +524,10 @@ The caveat is bottleneck 3, and it is a real one. Receptive field is ±1 from th
 stem and ±2 per block, so at `blocks=6` a cell sees ±13 — a 27×27 window. At
 11×11 that covers the whole board with room to spare, which means **the 5,000-step
 run tells us nothing about how routing behaves once the board exceeds the
-receptive field**. Past that, the only whole-board channel is a single mean-pooled
-hidden vector per block, and mean-pooling a 30×30 board into one vector is a very
-coarse summary to route a bus with. Expect this to be where size generalization
+receptive field**. Past that, the only whole-board channel is a pooled hidden
+vector per block. Mean+max preserves sparse cues better than the historical
+mean-only version, but a 30×30 board in one vector remains a coarse summary to
+route a bus with. Expect this to be where size generalization
 breaks; measure it before building anything for it.
 
 **Chains from inputs/outputs are the same task we already evaluate, scaled up.**
@@ -582,8 +583,8 @@ Full detail and rationale in [`docs/ROADMAP.md`](ROADMAP.md).
    scaled-down one.
 2. **Widen the ambiguous curriculum** — the open half of the work here, and the
    single highest-value item on the list (§1.3 says the curriculum is what is
-   capping the model). Four of six families are still rigid, and the two that are
-   not are small: the bank is 30 memorizable tasks (189 before the assemblers were
+   capping the model). Several families are still rigid, and two early composite
+   lessons are small: the bank is 30 memorizable tasks (189 before the assemblers were
    3×3 and the recipes were vanilla), and `CIRCUIT_LINE` is **7**.
 
    This item used to say "**raise the grid size first**". It was wrong, and

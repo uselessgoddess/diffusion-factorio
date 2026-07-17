@@ -20,7 +20,7 @@
 //! here to *show* it.
 
 use diffusion_factorio::blueprint::grid_to_blueprint;
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::textual::render;
 use diffusion_factorio::world::{Cell, Direction, Entity, Grid, Item};
 
@@ -117,7 +117,7 @@ fn one_cell_assembler_line() -> Grid {
 fn main() {
     let before = collisions(&one_cell_assembler_line(), "the old 1x1 assembler line");
 
-    let sample = generate(LessonKind::AssemblerLine, 11, 7).expect("gen");
+    let sample = generate(LessonKind::AssemblerLine, Canvas::square(11), 7).expect("gen");
     let after = collisions(&sample.solution, "what the lesson generates now");
 
     println!("old layout: {before} collision(s); current lesson: {after}");

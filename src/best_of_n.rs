@@ -71,17 +71,63 @@ pub fn parts(grid: &Grid) -> usize {
     grid.cells.iter().filter(|c| !c.is_empty()).count()
 }
 
-/// Does a draw scoring `score` from `count` parts beat the best so far?
+/// What a draw actually delivers: its simulator score if it can be built, and
+/// zero if it cannot.
 ///
-/// Throughput first, and compactness only among draws that already tie on it,
-/// so a leaner factory that delivers less always loses. The `best > 0.0` is what
-/// keeps the empty factory from winning: with every candidate at 0.0 the
-/// emptiest is the most compact, and rewarding it would be rewarding the model
-/// for giving up. When nothing delivers, the first draw stands and the caller
-/// can read the whole slate off `BestOfN::scores`.
-fn beats(score: f64, count: usize, best: f64, best_parts: usize, prefer_compact: bool) -> bool {
-    let tied = score == best && best > 0.0;
-    score > best || (prefer_compact && tied && count < best_parts)
+/// [`throughput::score`] propagates flow through whatever the grid holds without
+/// asking whether Factorio would accept it, so two assemblers sharing a tile can
+/// score well and still be an import error. That number is a simulation of a
+/// factory that does not exist. Nothing is delivered by a factory nobody can
+/// build, so this reports nothing, and the raw figure stays available through
+/// [`throughput::throughput`] for anyone diagnosing why.
+pub fn usable_score(grid: &Grid) -> f64 {
+    if grid.is_consistent() {
+        throughput::score(grid)
+    } else {
+        0.0
+    }
+}
+
+/// A draw, reduced to what ranking looks at.
+#[derive(Clone, Copy, Debug)]
+struct Ranked {
+    /// Whether [`Grid::is_consistent`] holds: every cell well-formed and every
+    /// footprint inside the grid, off the obstacles, and clear of every other.
+    buildable: bool,
+    /// [`usable_score`], not the raw simulator figure.
+    score: f64,
+    parts: usize,
+}
+
+/// Does a draw beat the best so far?
+///
+/// Buildable first, then throughput, then compactness among draws that already
+/// tie on it.
+///
+/// **Buildable outranks throughput** because an unbuildable factory's throughput
+/// is fiction. `throughput::score` propagates flow through whatever the grid
+/// holds without asking whether Factorio would accept it, so two assemblers
+/// sharing a tile can score well and still be an import error. Ranking on that
+/// number is ranking on a simulation of a factory that cannot exist. This is
+/// not the same guard as compactness below: a compact factory is real and merely
+/// worth less, an unbuildable one is not there.
+///
+/// It also closes the path that returned the user an unimportable layout even
+/// when a fine one was drawn. `best_score` starts at negative infinity, so draw
+/// 0 always won it; when every draw delivered 0.0 items/s, `score > best` was
+/// false for every later draw and `tied` was false because it requires
+/// `best > 0.0`. Draw 0 therefore stood unconditionally, buildable or not, and
+/// the slate behind it went unread.
+///
+/// Throughput still outranks compactness, and the `best > 0.0` is what keeps the
+/// empty factory from winning: with every candidate at 0.0 the emptiest is the
+/// most compact, and rewarding it would be rewarding the model for giving up.
+fn beats(cand: Ranked, best: Ranked, prefer_compact: bool) -> bool {
+    if cand.buildable != best.buildable {
+        return cand.buildable;
+    }
+    let tied = cand.score == best.score && best.score > 0.0;
+    cand.score > best.score || (prefer_compact && tied && cand.parts < best.parts)
 }
 
 /// What Best-of-N produced for one task.
@@ -89,16 +135,24 @@ fn beats(score: f64, count: usize, best: f64, best_parts: usize, prefer_compact:
 pub struct BestOfN {
     /// The winning candidate, diagnostics intact so it still renders in reports.
     pub best: ReconstructionDiagnostics,
-    /// Simulator score of every draw, in draw order.
+    /// [`usable_score`] of every draw, in draw order.
     pub scores: Vec<f64>,
     /// [`parts`] of every draw, in draw order.
     pub parts: Vec<usize>,
+    /// Whether each draw can be built, in draw order. A draw that cannot scores
+    /// 0.0 above, and this is what tells that apart from a factory that was built
+    /// correctly and simply delivers nothing.
+    pub buildable: Vec<bool>,
     /// Distinct grids among the draws.
     pub distinct: usize,
 }
 
 impl BestOfN {
     /// Items/second delivered by the winner.
+    ///
+    /// The maximum is the winner's own score, not a figure read off some other
+    /// draw: an unbuildable draw scores 0.0, so it can never hold a maximum that
+    /// the buildable winner does not already match.
     pub fn best_score(&self) -> f64 {
         self.scores
             .iter()
@@ -126,8 +180,15 @@ impl BestOfN {
     ///
     /// Zero when no two draws tie on throughput, which is the honest reading
     /// most of the time: the tiebreak can only pay out when there is a tie.
+    ///
+    /// Zero too when nothing delivers, for the same reason. The tiebreak declines
+    /// to run at all when every draw is at 0.0 — see [`beats`] — so the winner is
+    /// not the leanest of them and there is no saving to claim.
     pub fn parts_saved(&self) -> usize {
         let best = self.best_score();
+        if best <= 0.0 {
+            return 0;
+        }
         let tied = self
             .scores
             .iter()
@@ -155,10 +216,17 @@ pub fn best_of_n<B: Backend>(
     let draws = cfg.n.max(1);
 
     let mut best: Vec<Option<ReconstructionDiagnostics>> = (0..tasks).map(|_| None).collect();
-    let mut best_score = vec![f64::NEG_INFINITY; tasks];
-    let mut best_parts = vec![usize::MAX; tasks];
+    let mut best_rank = vec![
+        Ranked {
+            buildable: false,
+            score: f64::NEG_INFINITY,
+            parts: usize::MAX,
+        };
+        tasks
+    ];
     let mut scores: Vec<Vec<f64>> = (0..tasks).map(|_| Vec::with_capacity(draws)).collect();
     let mut part_counts: Vec<Vec<usize>> = (0..tasks).map(|_| Vec::with_capacity(draws)).collect();
+    let mut buildable: Vec<Vec<bool>> = (0..tasks).map(|_| Vec::with_capacity(draws)).collect();
     let mut seen: Vec<HashSet<u64>> = (0..tasks).map(|_| HashSet::new()).collect();
 
     // One batched pass per draw, rather than a single batch of `n * tasks`: the
@@ -170,35 +238,31 @@ pub fn best_of_n<B: Backend>(
         };
         let candidates = reconstruct_with_diagnostics(model, partials, observed, &round, device);
         for (task, candidate) in candidates.into_iter().enumerate() {
-            let score = throughput::score(&candidate.grid);
-            let count = parts(&candidate.grid);
+            let rank = Ranked {
+                buildable: candidate.grid.is_consistent(),
+                score: usable_score(&candidate.grid),
+                parts: parts(&candidate.grid),
+            };
             seen[task].insert(digest(&candidate.grid));
-            scores[task].push(score);
-            part_counts[task].push(count);
+            scores[task].push(rank.score);
+            part_counts[task].push(rank.parts);
+            buildable[task].push(rank.buildable);
 
-            if beats(
-                score,
-                count,
-                best_score[task],
-                best_parts[task],
-                cfg.prefer_compact,
-            ) {
-                best_score[task] = score;
-                best_parts[task] = count;
+            if beats(rank, best_rank[task], cfg.prefer_compact) {
+                best_rank[task] = rank;
                 best[task] = Some(candidate);
             }
         }
     }
 
     best.into_iter()
-        .zip(scores)
-        .zip(part_counts)
-        .zip(seen)
-        .map(|(((best, scores), parts), seen)| BestOfN {
+        .enumerate()
+        .map(|(task, best)| BestOfN {
             best: best.expect("every task gets at least one draw"),
-            scores,
-            parts,
-            distinct: seen.len(),
+            scores: std::mem::take(&mut scores[task]),
+            parts: std::mem::take(&mut part_counts[task]),
+            buildable: std::mem::take(&mut buildable[task]),
+            distinct: seen[task].len(),
         })
         .collect()
 }
@@ -223,7 +287,7 @@ fn digest(grid: &Grid) -> u64 {
 mod tests {
     use super::*;
     use crate::backend::CpuBackend;
-    use crate::factory_gen::{generate, LessonKind};
+    use crate::factory_gen::{generate, Canvas, LessonKind};
     use crate::model::DenoiserConfig;
     use crate::sample::reconstruct;
     use crate::world::{Cell, Direction, Entity, Item};
@@ -240,7 +304,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(11);
         let (mut partials, mut observed) = (Vec::new(), Vec::new());
         for seed in 0..n as u64 {
-            let sample = generate(LessonKind::MoveOneItem, 7, seed + 1).unwrap();
+            let sample = generate(LessonKind::MoveOneItem, Canvas::square(7), seed + 1).unwrap();
             let (partial, obs) = sample.blank(None, &mut rng);
             partials.push(partial);
             observed.push(obs);
@@ -283,7 +347,8 @@ mod tests {
                 pick.best_score(),
                 pick.first_score()
             );
-            assert_eq!(pick.best_score(), throughput::score(&pick.best.grid));
+            assert_eq!(pick.best_score(), usable_score(&pick.best.grid));
+            assert_eq!(pick.buildable.len(), 6);
         }
     }
 
@@ -312,7 +377,7 @@ mod tests {
                     ..cfg.sample.clone()
                 };
                 let grids = reconstruct(&model, &partials, &observed, &round, &Default::default());
-                replayed.push(throughput::score(&grids[task]));
+                replayed.push(usable_score(&grids[task]));
             }
             assert_eq!(replayed, pick.scores, "draws are not reproducible");
             assert_eq!(
@@ -475,47 +540,146 @@ mod tests {
         assert!(throughput::score(&empty) < throughput::score(&detour(false)));
 
         // Scored in draw order, the empty grid arrives first and still loses.
-        let scores = [0.0, throughput::score(&detour(false))];
-        let counts = [parts(&empty), parts(&detour(false))];
-        assert_eq!(pick_index(&scores, &counts, true), 1);
+        assert_eq!(
+            pick_index(&[ranked(&empty), ranked(&detour(false))], true),
+            1
+        );
     }
 
-    /// Which draw wins, run through the same [`beats`] the draw loop uses, so
-    /// this cannot drift from what `best_of_n` actually does.
-    fn pick_index(scores: &[f64], parts: &[usize], prefer_compact: bool) -> usize {
-        let (mut best, mut best_score, mut best_parts) = (0, f64::NEG_INFINITY, usize::MAX);
-        for (i, (&score, &count)) in scores.iter().zip(parts).enumerate() {
-            if beats(score, count, best_score, best_parts, prefer_compact) {
-                best = i;
-                best_score = score;
-                best_parts = count;
+    /// Which draw wins, run through the same [`beats`] the draw loop uses, and
+    /// seeded the same way, so this cannot drift from what `best_of_n` does.
+    fn pick_index(draws: &[Ranked], prefer_compact: bool) -> usize {
+        let mut winner = 0;
+        let mut best = Ranked {
+            buildable: false,
+            score: f64::NEG_INFINITY,
+            parts: usize::MAX,
+        };
+        for (i, &cand) in draws.iter().enumerate() {
+            if beats(cand, best, prefer_compact) {
+                winner = i;
+                best = cand;
             }
         }
-        best
+        winner
+    }
+
+    /// A grid reduced to what ranking sees, exactly as the draw loop reduces it.
+    fn ranked(grid: &Grid) -> Ranked {
+        Ranked {
+            buildable: grid.is_consistent(),
+            score: usable_score(grid),
+            parts: parts(grid),
+        }
+    }
+
+    /// A belt facing nowhere: the cell the user's log kept refusing to export.
+    fn belt_facing_nowhere() -> Cell {
+        Cell {
+            entity: Entity::TransportBelt,
+            direction: Direction::None,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn a_tie_on_throughput_goes_to_the_factory_with_fewer_parts() {
-        let scores = [
-            throughput::score(&detour(true)),
-            throughput::score(&detour(false)),
-        ];
-        let counts = [parts(&detour(true)), parts(&detour(false))];
+        let draws = [ranked(&detour(true)), ranked(&detour(false))];
 
         // The roomy detour is drawn first and is beaten by the lean one behind it.
-        assert_eq!(pick_index(&scores, &counts, true), 1);
+        assert_eq!(pick_index(&draws, true), 1);
         // Switched off, the first of the tied draws stands: this is the choice
         // the flag makes, not something the scores were going to decide anyway.
-        assert_eq!(pick_index(&scores, &counts, false), 0);
+        assert_eq!(pick_index(&draws, false), 0);
     }
 
     /// Compactness is a tiebreak, never a trade: a leaner factory that delivers
     /// less must lose, or the flag would be quietly costing throughput.
     #[test]
     fn compactness_never_outranks_throughput() {
-        let scores = [15.0, 0.86];
-        let counts = [12, 3];
-        assert_eq!(pick_index(&scores, &counts, true), 0);
+        let draws = [
+            Ranked {
+                buildable: true,
+                score: 15.0,
+                parts: 12,
+            },
+            Ranked {
+                buildable: true,
+                score: 0.86,
+                parts: 3,
+            },
+        ];
+        assert_eq!(pick_index(&draws, true), 0);
+    }
+
+    /// The user's import error, in grid form. The simulator is happy to score the
+    /// factory around a belt facing nowhere — the belt run beside it really would
+    /// deliver — but Factorio rejects the blueprint, so the whole thing delivers
+    /// nothing. This is the gap [`usable_score`] closes.
+    #[test]
+    fn a_factory_that_cannot_be_built_delivers_nothing() {
+        let mut broken = detour(false);
+        broken.set(0, 2, belt_facing_nowhere());
+        assert!(
+            !broken.is_consistent(),
+            "a belt facing nowhere is not legal"
+        );
+
+        // The raw figure is not wrong about the flow; it is about a factory that
+        // cannot exist. Unchanged, because the stray belt is off the path.
+        assert_eq!(
+            throughput::score(&broken),
+            throughput::score(&detour(false))
+        );
+        assert!(throughput::score(&broken) > 0.0);
+        assert_eq!(usable_score(&broken), 0.0);
+    }
+
+    /// The path that handed the user an unimportable layout even when a fine one
+    /// was drawn. `best` starts at negative infinity, so draw 0 took it; with
+    /// every draw at 0.0 nothing behind it could pass `score > best`, and the
+    /// compactness tiebreak declines to run at zero. Draw 0 stood unconditionally
+    /// and the slate behind it went unread.
+    #[test]
+    fn an_unbuildable_draw_never_wins_however_it_is_drawn() {
+        let empty = Grid::new(5, 3);
+        let mut broken = Grid::new(5, 3);
+        broken.set(0, 2, belt_facing_nowhere());
+        assert_eq!(usable_score(&broken), 0.0);
+        assert_eq!(usable_score(&empty), 0.0);
+
+        // Both deliver nothing and the unbuildable one is drawn first. The empty
+        // grid is a real factory that happens to be useless, which is strictly
+        // more than the other one is, so it takes it.
+        assert_eq!(pick_index(&[ranked(&broken), ranked(&empty)], true), 1);
+
+        // Against a factory that works it loses from either side of the draw.
+        let working = detour(false);
+        assert_eq!(pick_index(&[ranked(&broken), ranked(&working)], true), 1);
+        assert_eq!(pick_index(&[ranked(&working), ranked(&broken)], true), 0);
+    }
+
+    /// Buildable outranks throughput, and not merely as a tiebreak: this draw
+    /// simulates better *and* is leaner, and still loses.
+    ///
+    /// [`usable_score`] would already have zeroed that 15.0, so this state is one
+    /// the draw loop cannot reach — which is the point. The two guards are
+    /// independent, and [`beats`] must not start depending on the other one.
+    #[test]
+    fn a_draw_that_cannot_be_built_loses_however_well_it_simulates() {
+        let draws = [
+            Ranked {
+                buildable: false,
+                score: 15.0,
+                parts: 3,
+            },
+            Ranked {
+                buildable: true,
+                score: 0.86,
+                parts: 12,
+            },
+        ];
+        assert_eq!(pick_index(&draws, true), 1);
     }
 
     #[test]

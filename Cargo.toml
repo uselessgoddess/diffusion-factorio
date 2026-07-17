@@ -63,3 +63,23 @@ path = "experiments/bus_tap.rs"
 [[example]]
 name = "unbounded_sink"
 path = "experiments/unbounded_sink.rs"
+
+[[example]]
+name = "reveal_schedule"
+path = "experiments/reveal_schedule.rs"
+
+[[example]]
+name = "sampling_defaults"
+path = "experiments/sampling_defaults.rs"
+
+[[example]]
+name = "grid_shape"
+path = "experiments/grid_shape.rs"
+
+[[example]]
+name = "canvas_curriculum"
+path = "experiments/canvas_curriculum.rs"
+
+[[example]]
+name = "issue_examples"
+path = "experiments/issue_examples.rs"

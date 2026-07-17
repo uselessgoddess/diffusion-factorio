@@ -6,20 +6,19 @@
 //! experiment distinguishes them by measuring the curriculum itself — no model
 //! involved.
 //!
-//! Run: `cargo run --release --example task_space [SIZE]`
+//! Run: `cargo run --release --example task_space [WIDTH] [HEIGHT]`
 //!
-//! `SIZE` defaults to [`train::TrainConfig`]'s grid size. Pass another to ask
-//! the question that answer raised — how much task space a bigger board buys.
+//! Both default to a square 11 — the canvas the reported runs trained on.
+//! Pass another to ask the question that answer raised: how much task space a
+//! bigger, or a differently-shaped, board buys.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::sim::item_reaches_sink;
 use diffusion_factorio::textual::render;
 use diffusion_factorio::world::{Cell, Entity, Grid, Item};
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha8Rng;
 
 const DEFAULT_SIZE: usize = 11;
 const SEEDS: u64 = 200_000;
@@ -179,25 +178,23 @@ fn answer_shape_key(g: &Grid, observed: &[bool]) -> String {
 }
 
 fn main() {
-    let size: usize = std::env::args()
-        .nth(1)
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(DEFAULT_SIZE);
+    // `task_space [width] [height]`. Height defaults to width, so the old
+    // one-argument invocation still means a square.
+    let arg = |n: usize| -> Option<usize> { std::env::args().nth(n).and_then(|a| a.parse().ok()) };
+    let width = arg(1).unwrap_or(DEFAULT_SIZE);
+    let canvas = Canvas::new(width, arg(2).unwrap_or(width));
 
-    let feasible = LessonKind::all()
-        .iter()
-        .filter(|k| size >= k.min_size())
-        .count();
+    let feasible = LessonKind::all().iter().filter(|k| k.fits(canvas)).count();
 
     println!("=== 1. How many distinct factories can each lesson family produce? ===");
-    println!("(size {size}, {SEEDS} distinct generator seeds per family)");
+    println!("({canvas}, {SEEDS} distinct generator seeds per family)");
     println!(
-        "({feasible} of {} families fit at this size)\n",
+        "({feasible} of {} families fit on this canvas)\n",
         LessonKind::all().len()
     );
 
     let mut totals = Vec::new();
-    for &kind in LessonKind::all().iter().filter(|k| size >= k.min_size()) {
+    for &kind in LessonKind::all().iter().filter(|k| k.fits(canvas)) {
         let t0 = Instant::now();
         let mut factories = HashSet::new();
         let mut shapes = HashSet::new();
@@ -208,17 +205,17 @@ fn main() {
         let mut answers_per_context: HashMap<String, HashSet<String>> = HashMap::new();
 
         for seed in 0..SEEDS {
-            let Some(sample) = generate(kind, size, seed) else {
+            let Some(sample) = generate(kind, canvas, seed) else {
                 continue;
             };
             generated += 1;
             factories.insert(factory_key(&sample.solution));
             shapes.insert(translation_invariant_key(&sample.solution));
 
-            // Reproduce exactly what train.rs validation does: blank every
-            // removable cell, keep the protected scaffold observed.
-            let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let (_partial, observed) = sample.blank(None, &mut rng);
+            // Reproduce production training and scratch validation exactly:
+            // only source/sink task anchors stay observed. `protected` may hold
+            // answer cells for legacy inpainting and must not shrink this count.
+            let (_partial, observed) = sample.blank_to_scaffold();
             answer_shapes.insert(answer_shape_key(&sample.solution, &observed));
             answers_per_context
                 .entry(conditioning_key(&sample.solution, &observed))

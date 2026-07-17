@@ -161,11 +161,16 @@ function show(r) {
   frames = r.frames;
   const best = Math.max(...r.candidate_scores).toFixed(3);
   const worst = Math.min(...r.candidate_scores).toFixed(3);
+  const unbuildable = r.candidate_buildable.filter(b => !b).length;
+  // A draw that cannot be built scores 0/s however well it would have run, so
+  // say which zero this is rather than let it read as a routing failure.
   const verdict = r.score > 0
     ? `<span class="good">delivers ${r.score.toFixed(3)} items/s</span>`
-    : (r.functional
-        ? `<span class="bad">reaches a sink but delivers 0/s</span>`
-        : `<span class="bad">delivers nothing</span>`);
+    : (r.blueprint_error
+        ? `<span class="bad">cannot be built, so delivers nothing</span>`
+        : (r.functional
+            ? `<span class="bad">reaches a sink but delivers 0/s</span>`
+            : `<span class="bad">delivers nothing</span>`));
   const deliveries = r.deliveries.map(d =>
     `sink (${d.x},${d.y}) wants ${d.item}: ${d.achieved.toFixed(3)}/s`).join("<br>");
 
@@ -179,7 +184,8 @@ function show(r) {
     <div id="verdict">${verdict}</div>
     <div class="muted">${deliveries || "no sinks"}</div>
     <p id="scores">best of ${r.candidate_scores.length}: ${best}/s,
-       worst ${worst}/s, ${r.distinct} distinct ${r.distinct === 1 ? "idea" : "ideas"}</p>
+       worst ${worst}/s, ${r.distinct} distinct ${r.distinct === 1 ? "idea" : "ideas"}${
+       unbuildable ? `, ${unbuildable} unbuildable` : ""}</p>
     ${r.blueprint
       ? `<textarea readonly>${r.blueprint}</textarea>
          <p class="hint">Blueprint string — paste into Factorio.</p>`

@@ -1,5 +1,5 @@
-//! Load a checkpoint, blank known factories, and reconstruct them — the
-//! always-available "is the model actually building working factories?" check.
+//! Load a checkpoint and reconstruct generated factories. By default this
+//! fills removable gaps; `--scratch` leaves only source/sink task anchors.
 //!
 //! Prints, per example, the masked input, the model's reconstruction and the
 //! ground truth, plus an aggregate reconstruction report (per-channel accuracy,
@@ -17,12 +17,13 @@ use std::path::PathBuf;
 use clap::Parser;
 use diffusion_factorio::best_of_n::{best_of_n, BestOfN, BestOfNConfig};
 use diffusion_factorio::blueprint::{blueprint_string, grid_to_blueprint};
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::metrics::reconstruction_report;
 use diffusion_factorio::observability::{write_sample_report, SampleReportEntry};
 use diffusion_factorio::persist;
 use diffusion_factorio::sample::{reconstruct_with_diagnostics, SampleConfig};
 use diffusion_factorio::textual::render;
+use diffusion_factorio::train::feasible_kinds;
 use diffusion_factorio::world::Grid;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -36,14 +37,27 @@ struct Args {
     /// Checkpoint prefix (expects `<ckpt>.mpk` + `<ckpt>.json`).
     #[arg(long, default_value = "checkpoints/denoiser")]
     ckpt: PathBuf,
+    /// Canvas width to evaluate on.
     #[arg(long, default_value_t = 11)]
     size: usize,
+    /// Canvas height. Defaults to `--size`, so the old invocation still means a
+    /// square — but the shape the issue infers on is `--size 13 --height 9`, and
+    /// scoring the model there is the whole point of cause 5.
+    #[arg(long)]
+    height: Option<usize>,
     /// How many examples to print in detail.
     #[arg(long, default_value_t = 4)]
     show: usize,
     /// Aggregate report over this many blanked factories.
     #[arg(long, default_value_t = 128)]
     eval: usize,
+    /// Evaluate one lesson family, for example `ASSEMBLER_CHAOS`.
+    #[arg(long, value_parser = parse_lesson)]
+    lesson: Option<LessonKind>,
+    /// Reconstruct from source/sink task anchors only instead of filling
+    /// randomly removed entities in an otherwise visible design.
+    #[arg(long)]
+    scratch: bool,
     #[arg(long, default_value_t = 12)]
     steps: usize,
     #[arg(long, default_value_t = 0)]
@@ -62,6 +76,23 @@ struct Args {
     /// Export the first reconstruction as an importable Factorio blueprint.
     #[arg(long)]
     blueprint_out: Option<PathBuf>,
+}
+
+fn parse_lesson(value: &str) -> Result<LessonKind, String> {
+    LessonKind::all()
+        .iter()
+        .copied()
+        .find(|kind| kind.name().eq_ignore_ascii_case(value))
+        .ok_or_else(|| {
+            format!(
+                "unknown lesson {value:?}; expected one of {}",
+                LessonKind::all()
+                    .iter()
+                    .map(|kind| kind.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
 }
 
 fn main() -> anyhow::Result<()> {
@@ -85,16 +116,41 @@ fn main() -> anyhow::Result<()> {
     let mut rng = ChaCha8Rng::seed_from_u64(args.seed.wrapping_add(0xB1A2));
 
     // Build an evaluation set of blanked factories across all feasible lessons.
+    //
+    // `feasible_kinds` rather than every kind, and this is load-bearing: the loop
+    // below holds the kind fixed until it generates, so offering it a family that
+    // can never fit this canvas is an infinite loop rather than an error. That
+    // was reachable before any of this (`--size 9` cannot hold a circuit line),
+    // and asking for a rectangle is exactly what makes it easy to hit.
+    let canvas = Canvas::new(args.size, args.height.unwrap_or(args.size));
+    let feasible = match args.lesson {
+        Some(kind) if kind.fits(canvas) => vec![kind],
+        Some(kind) => anyhow::bail!(
+            "lesson {} needs at least {}, but the requested canvas is {}",
+            kind.name(),
+            kind.min_canvas(),
+            canvas,
+        ),
+        None => feasible_kinds(canvas),
+    };
+    anyhow::ensure!(
+        !feasible.is_empty(),
+        "no lesson fits a {canvas} canvas -- nothing to evaluate on"
+    );
     let mut originals: Vec<Grid> = Vec::new();
     let mut partials: Vec<Grid> = Vec::new();
     let mut observed: Vec<Vec<bool>> = Vec::new();
     let mut kinds: Vec<LessonKind> = Vec::new();
     let mut ctr = args.seed;
     while originals.len() < args.eval {
-        let kind = LessonKind::all()[originals.len() % LessonKind::all().len()];
+        let kind = feasible[originals.len() % feasible.len()];
         ctr += 1;
-        if let Some(s) = generate(kind, args.size, ctr) {
-            let (partial, obs) = s.blank(None, &mut rng);
+        if let Some(s) = generate(kind, canvas, ctr) {
+            let (partial, obs) = if args.scratch {
+                s.blank_to_scaffold()
+            } else {
+                s.blank(None, &mut rng)
+            };
             originals.push(s.solution);
             partials.push(partial);
             observed.push(obs);
@@ -185,4 +241,22 @@ fn main() -> anyhow::Result<()> {
         println!("saved Factorio blueprint to {}", path.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lesson_parser_accepts_report_names_case_insensitively() {
+        assert_eq!(
+            parse_lesson("ASSEMBLER_CHAOS").unwrap(),
+            LessonKind::AssemblerChaos
+        );
+        assert_eq!(
+            parse_lesson("move_one_item").unwrap(),
+            LessonKind::MoveOneItem
+        );
+        assert!(parse_lesson("not-a-lesson").is_err());
+    }
 }

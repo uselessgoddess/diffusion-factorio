@@ -5,7 +5,7 @@
 //!     are embedded, never fed as raw ordinals — same rationale as the
 //!     reference's `_encode_input`.
 //!   * A residual conv tower operating on the full grid, each block injecting a
-//!     **global-context vector** (mean-pool -> linear -> broadcast) and a
+//!     **global-context vector** (mean+max pool -> linear -> broadcast) and a
 //!     **time-conditioning vector** (FiLM-style add). The global context
 //!     directly addresses the reference's receptive-field bottleneck ("which way
 //!     is the sink" is a grid-global question a local window can't answer).
@@ -147,15 +147,20 @@ impl<B: Backend> ResBlock<B> {
         Self {
             conv1: conv(),
             conv2: conv(),
-            global: LinearConfig::new(hidden, hidden).init(device),
+            global: LinearConfig::new(2 * hidden, hidden).init(device),
         }
     }
 
     fn forward(&self, x: Tensor<B, 4>, temb: Tensor<B, 4>) -> Tensor<B, 4> {
         let [batch, ch, _h, _w] = x.dims();
-        // Global context: mean over spatial dims -> linear -> broadcast add.
-        let g = x.clone().mean_dim(3).mean_dim(2); // [B, C, 1, 1]
-        let g = g.reshape([batch, ch]);
+        // Mean says how common a feature is; max preserves a sparse cue such as
+        // one source, sink or obstacle that the mean dilutes as boards grow.
+        // Concatenating both mirrors the measured global-context improvement in
+        // the reference implementation while keeping this model fully
+        // convolutional and size-agnostic.
+        let mean = x.clone().mean_dim(3).mean_dim(2); // [B, C, 1, 1]
+        let max = x.clone().max_dim(3).max_dim(2); // [B, C, 1, 1]
+        let g = Tensor::cat(vec![mean, max], 1).reshape([batch, 2 * ch]);
         let g = self.global.forward(g).reshape([batch, ch, 1, 1]);
 
         let mut h = self.conv1.forward(x.clone());
@@ -212,6 +217,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn global_context_projects_concatenated_mean_and_max_features() {
+        type B = CpuBackend;
+        let device = Default::default();
+        let hidden = 16;
+        let model = DenoiserConfig::new()
+            .with_hidden(hidden)
+            .with_blocks(1)
+            .init::<B>(&device);
+        assert_eq!(
+            model.blocks[0].global.weight.val().dims(),
+            [2 * hidden, hidden]
+        );
+    }
+
     /// Raising the grid size is a config change, not an architecture change.
     ///
     /// Nothing here is sized by the board: the embeddings are per-token, the
@@ -245,7 +265,7 @@ mod tests {
     /// on top of the 3x3 stem (+/-1), so `blocks` blocks reach `2*blocks + 1`
     /// cells. The default 6 reaches 13 — a 27x27 window, comfortably over the
     /// sizes above. Past that, a cell stops being able to condition on the far
-    /// corner directly and only the mean-pooled global context connects them.
+    /// corner directly and only the pooled global context connects them.
     #[test]
     fn the_default_tower_can_see_across_the_grids_we_train_on() {
         let reach = 2 * DenoiserConfig::new().blocks + 1;

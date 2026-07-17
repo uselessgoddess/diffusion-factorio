@@ -20,12 +20,16 @@ use crate::world::Grid;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunMetadata {
     pub backend: String,
-    pub grid_size: usize,
+    /// The canvas shapes the run trained on, e.g. `9x9 .. 15x15` — a pool, not a
+    /// number, since a run no longer sees one shape.
+    pub canvases: String,
     pub steps: usize,
     pub batch_size: usize,
     pub val_batch: usize,
     pub sample_steps: usize,
     pub seed: u64,
+    pub legacy_protected_scaffold: bool,
+    pub include_assembler_open: bool,
     pub peak_lr: f64,
     pub warmup_steps: usize,
     pub grad_clip: f32,
@@ -35,7 +39,9 @@ pub struct RunMetadata {
     pub time_dim: usize,
     pub elbo_weight: bool,
     pub t_min: f64,
+    pub scratch_probability: f64,
     pub structure_weight: f64,
+    pub assembler_weight: f64,
 }
 
 /// Streaming JSONL writer. Each append is flushed so interrupted GPU runs keep
@@ -170,6 +176,8 @@ fn metric_record(log: &TrainLog) -> Value {
         "nll": log.nll,
         "mask_rate": log.t_mean,
         "placement_recall": log.placement_acc,
+        "assembler_recall": log.assembler_acc,
+        "recipe_accuracy": log.recipe_acc,
         "train": {
             "entity_acc": log.train_acc[0],
             "direction_acc": log.train_acc[1],
@@ -199,6 +207,17 @@ fn validation_record(r: &ReconReport) -> Value {
         "original_throughput": r.original_throughput_mean(),
         "throughput_ratio": r.throughput_ratio_mean(),
         "beat_original": r.beat_original,
+        "placement_targets": r.placement_targets,
+        "placement_recall": r.placement_recall(),
+        "assembler_targets": r.assembler_targets,
+        "assembler_recall": r.assembler_recall(),
+        "recipe_accuracy": r.recipe_accuracy(),
+        "inserter_targets": r.inserter_targets,
+        "inserter_recall": r.inserter_recall(),
+        "inserter_direction_accuracy": r.inserter_direction_accuracy(),
+        "belt_targets": r.belt_targets,
+        "belt_recall": r.belt_recall(),
+        "belt_direction_accuracy": r.belt_direction_accuracy(),
         "entity_acc": r.channel_acc(0),
         "direction_acc": r.channel_acc(1),
         "item_acc": r.channel_acc(2),
@@ -275,7 +294,7 @@ const TRAINING_REPORT_TEMPLATE: &str = r#"<!doctype html>
  <div class="chart"><h2>Loss and per-channel NLL</h2><canvas id="loss"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>weighted loss</span><span><i class="dot" style="background:var(--b)"></i>entity NLL</span><span><i class="dot" style="background:var(--c)"></i>direction NLL</span></div></div>
  <div class="chart"><h2>Learning rate</h2><canvas id="schedule"></canvas><div class="legend"><span><i class="dot" style="background:var(--c)"></i>warmup + cosine schedule</span></div></div>
  <div class="chart"><h2>Training throughput</h2><canvas id="speed"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>average samples / second</span></div></div>
- <div class="chart"><h2>Placement recall and train accuracy</h2><canvas id="train"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>Placement recall</span><span><i class="dot" style="background:var(--c)"></i>entity</span><span><i class="dot" style="background:var(--b)"></i>direction</span></div></div>
+ <div class="chart"><h2>Placement and recipe learning</h2><canvas id="train"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>Assembler recall</span><span><i class="dot" style="background:var(--c)"></i>Recipe accuracy</span><span><i class="dot" style="background:var(--b)"></i>All non-empty placement</span></div></div>
  <div class="chart"><h2>Functional / exact / consistent</h2><canvas id="validation"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>functional</span><span><i class="dot" style="background:var(--c)"></i>exact</span><span><i class="dot" style="background:var(--b)"></i>consistent</span></div></div>
  <div class="chart"><h2>Built from scratch (source and sink only)</h2><canvas id="scratch"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>functional</span><span><i class="dot" style="background:var(--c)"></i>exact</span></div></div>
  <div class="chart"><h2>Delivered throughput vs. the taught answer</h2><canvas id="rate"></canvas><div class="legend"><span><i class="dot" style="background:var(--a)"></i>in-painting</span><span><i class="dot" style="background:var(--c)"></i>from scratch</span><span><i class="dot" style="background:var(--d)"></i>parity with the generator</span></div><div class="muted">Items/second delivered as a fraction of what the generator's own answer delivers. This is the only curve that can separate two factories that both work — and the only one that can go <b>above</b> 1.0, which means the model out-built what it was taught.</div></div>
@@ -290,14 +309,14 @@ const TRAINING_REPORT_TEMPLATE: &str = r#"<!doctype html>
 const data=JSON.parse(document.getElementById('report-data').textContent),m=data.metadata,rows=data.metrics;
 const last=rows[rows.length-1]||{},lastVal=[...rows].reverse().find(x=>x.val)?.val,lastScratch=[...rows].reverse().find(x=>x.val_scratch)?.val_scratch;
 const pct=v=>v===undefined?'—':(100*v).toFixed(1)+'%';
-const cards=[['Backend',m.backend],['Grid',m.grid_size+' × '+m.grid_size],['Samples seen',(last.samples_seen||0).toLocaleString()],['Samples / sec',(last.samples_per_second||0).toFixed(1)],['Final loss',(last.loss||0).toFixed(4)],['Validation functional',pct(lastVal?.functional_rate)],['From-scratch functional',pct(lastScratch?.functional_rate)],['From-scratch throughput',pct(lastScratch?.throughput_ratio)+' of taught'],['Beat the taught answer',(lastScratch?.beat_original??'—')+' / '+(lastScratch?.n??'—')]];
+const cards=[['Backend',m.backend],['Canvases',m.canvases],['Samples seen',(last.samples_seen||0).toLocaleString()],['Samples / sec',(last.samples_per_second||0).toFixed(1)],['Final loss',(last.loss||0).toFixed(4)],['Validation functional',pct(lastVal?.functional_rate)],['From-scratch functional',pct(lastScratch?.functional_rate)],['From-scratch throughput',pct(lastScratch?.throughput_ratio)+' of taught'],['Beat the taught answer',(lastScratch?.beat_original??'—')+' / '+(lastScratch?.n??'—')]];
 document.getElementById('summary').innerHTML=cards.map(x=>`<div class="card"><span class="muted">${x[0]}</span><b>${x[1]}</b></div>`).join('');
-const meanings={backend:'Compute backend used for this run.',grid_size:'Width and height of each categorical world.',steps:'Optimizer updates.',batch_size:'Fresh procedural factories per update.',val_batch:'Fixed held-out factories scored at each validation.',sample_steps:'Reverse-diffusion reveal rounds during validation.',seed:'Controls training and the independent frozen validation corpus.',peak_lr:'Maximum AdamW learning rate.',warmup_steps:'Linear ramp before cosine decay.',grad_clip:'Maximum gradient norm.',hidden:'Convolution tower width.',blocks:'Residual convolution blocks.',embed_dim:'Embedding width per categorical channel.',time_dim:'Diffusion-time embedding width.',elbo_weight:'Use continuous-time 1/t ELBO weighting.',t_min:'Minimum diffusion time used by ELBO weighting.',structure_weight:'Extra loss weight for non-empty target cells; counters empty collapse.'};
+const meanings={backend:'Compute backend used for this run.',canvases:'The canvas shapes the run trained on; one shape per batch.',steps:'Optimizer updates.',batch_size:'Fresh procedural factories per update.',val_batch:'Fixed held-out factories scored at each validation.',sample_steps:'Reverse-diffusion reveal rounds during validation.',seed:'Controls training and the independent frozen validation corpus.',legacy_protected_scaffold:'A/B control that reveals protected answer cells; false for real training.',include_assembler_open:'Whether training includes the obstacle-free arbitrary-assembler curriculum rung.',peak_lr:'Maximum AdamW learning rate.',warmup_steps:'Linear ramp before cosine decay.',grad_clip:'Maximum gradient norm.',hidden:'Convolution tower width.',blocks:'Residual convolution blocks.',embed_dim:'Embedding width per categorical channel.',time_dim:'Diffusion-time embedding width.',elbo_weight:'Use continuous-time 1/t ELBO weighting.',t_min:'Minimum diffusion time used by ELBO weighting.',scratch_probability:'Fraction of examples noised to the exact fully masked state used to begin sampling.',structure_weight:'Extra loss weight for non-empty target cells; counters empty collapse.',assembler_weight:'Additional loss multiplier for the sparse assembler anchor and its recipe.'};
 document.getElementById('parameters').innerHTML=Object.entries(m).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td><td class="muted">${meanings[k]||''}</td></tr>`).join('');
-function lessonTable(id,key){const latest=[...rows].reverse().find(r=>Object.keys(r[key]||{}).length)?.[key]||{};document.getElementById(id).innerHTML='<tr><td>lesson</td><td>n</td><td>functional</td><td>exact</td><td>consistent</td><td>throughput</td><td>beat</td></tr>'+Object.entries(latest).map(([name,v])=>`<tr><td>${name}</td><td>${v.n}</td><td>${pct(v.functional_rate)}</td><td>${pct(v.exact_rate)}</td><td>${pct(v.consistent_rate)}</td><td>${pct(v.throughput_ratio)}</td><td>${v.beat_original??'—'}</td></tr>`).join('');}
+function lessonTable(id,key){const latest=[...rows].reverse().find(r=>Object.keys(r[key]||{}).length)?.[key]||{};document.getElementById(id).innerHTML='<tr><td>lesson</td><td>n</td><td>functional</td><td>exact</td><td>place</td><td>assembler</td><td>recipe</td><td>inserter E/D</td><td>belt E/D</td><td>throughput</td><td>beat</td></tr>'+Object.entries(latest).map(([name,v])=>`<tr><td>${name}</td><td>${v.n}</td><td>${pct(v.functional_rate)}</td><td>${pct(v.exact_rate)}</td><td>${pct(v.placement_recall)}</td><td>${pct(v.assembler_recall)}</td><td>${pct(v.recipe_accuracy)}</td><td>${pct(v.inserter_recall)} / ${pct(v.inserter_direction_accuracy)}</td><td>${pct(v.belt_recall)} / ${pct(v.belt_direction_accuracy)}</td><td>${pct(v.throughput_ratio)}</td><td>${v.beat_original??'—'}</td></tr>`).join('');}
 lessonTable('lessons','val_by_lesson');lessonTable('scratch-lessons','val_scratch_by_lesson');
 function chart(id,series,yFixed=false){const c=document.getElementById(id),ctx=c.getContext('2d'),dpr=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=w*dpr;c.height=h*dpr;ctx.scale(dpr,dpr);ctx.strokeStyle='#34414c';ctx.lineWidth=1;for(let i=0;i<5;i++){let y=12+i*(h-30)/4;ctx.beginPath();ctx.moveTo(42,y);ctx.lineTo(w-8,y);ctx.stroke()}const vals=series.flatMap(s=>s.values.map(x=>x[1])).filter(Number.isFinite),max=yFixed?1:vals.reduce((a,v)=>Math.max(a,v),1e-12),min=yFixed?0:vals.reduce((a,v)=>Math.min(a,v),0);for(const s of series){ctx.strokeStyle=s.color;ctx.lineWidth=2;ctx.beginPath();let started=false;for(const [step,v] of s.values){if(!Number.isFinite(v))continue;const x=42+(w-52)*(step-1)/Math.max(1,m.steps-1),y=12+(h-30)*(1-(v-min)/Math.max(1e-12,max-min));started?ctx.lineTo(x,y):ctx.moveTo(x,y);started=true}ctx.stroke()}ctx.fillStyle='#9eabb6';ctx.font='11px system-ui';ctx.fillText(max.toPrecision(3),3,14);ctx.fillText(min.toPrecision(3),3,h-8)}
-const xy=f=>rows.map(r=>[r.step,f(r)]);chart('loss',[{color:'#5ee6a8',values:xy(r=>r.loss)},{color:'#ffcc66',values:xy(r=>r.train.entity_nll)},{color:'#79b8ff',values:xy(r=>r.train.direction_nll)}]);chart('schedule',[{color:'#79b8ff',values:xy(r=>r.lr)}]);chart('speed',[{color:'#5ee6a8',values:xy(r=>r.samples_per_second)}]);chart('train',[{color:'#5ee6a8',values:xy(r=>r.placement_recall)},{color:'#79b8ff',values:xy(r=>r.train.entity_acc)},{color:'#ffcc66',values:xy(r=>r.train.direction_acc)}],true);const vr=rows.filter(r=>r.val);chart('validation',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.functional_rate])},{color:'#79b8ff',values:vr.map(r=>[r.step,r.val.exact_rate])},{color:'#ffcc66',values:vr.map(r=>[r.step,r.val.consistent_rate])}],true);const sr=rows.filter(r=>r.val_scratch);chart('scratch',[{color:'#5ee6a8',values:sr.map(r=>[r.step,r.val_scratch.functional_rate])},{color:'#79b8ff',values:sr.map(r=>[r.step,r.val_scratch.exact_rate])}],true);chart('rate',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.throughput_ratio])},{color:'#79b8ff',values:sr.map(r=>[r.step,r.val_scratch.throughput_ratio])},{color:'#ff7b9c',values:rows.map(r=>[r.step,1])}]);
+const xy=f=>rows.map(r=>[r.step,f(r)]);chart('loss',[{color:'#5ee6a8',values:xy(r=>r.loss)},{color:'#ffcc66',values:xy(r=>r.train.entity_nll)},{color:'#79b8ff',values:xy(r=>r.train.direction_nll)}]);chart('schedule',[{color:'#79b8ff',values:xy(r=>r.lr)}]);chart('speed',[{color:'#5ee6a8',values:xy(r=>r.samples_per_second)}]);chart('train',[{color:'#5ee6a8',values:xy(r=>r.assembler_recall)},{color:'#79b8ff',values:xy(r=>r.recipe_accuracy)},{color:'#ffcc66',values:xy(r=>r.placement_recall)}],true);const vr=rows.filter(r=>r.val);chart('validation',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.functional_rate])},{color:'#79b8ff',values:vr.map(r=>[r.step,r.val.exact_rate])},{color:'#ffcc66',values:vr.map(r=>[r.step,r.val.consistent_rate])}],true);const sr=rows.filter(r=>r.val_scratch);chart('scratch',[{color:'#5ee6a8',values:sr.map(r=>[r.step,r.val_scratch.functional_rate])},{color:'#79b8ff',values:sr.map(r=>[r.step,r.val_scratch.exact_rate])}],true);chart('rate',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.throughput_ratio])},{color:'#79b8ff',values:sr.map(r=>[r.step,r.val_scratch.throughput_ratio])},{color:'#ff7b9c',values:rows.map(r=>[r.step,1])}]);
 chart('thput',[{color:'#5ee6a8',values:vr.map(r=>[r.step,r.val.throughput])},{color:'#79b8ff',values:sr.map(r=>[r.step,r.val_scratch.throughput])},{color:'#ffcc66',values:vr.map(r=>[r.step,r.val.original_throughput])}]);
 const frac=(v,k)=>v.n?v[k]/v.n:0;chart('beat',[{color:'#5ee6a8',values:vr.map(r=>[r.step,frac(r.val,'beat_original')])},{color:'#79b8ff',values:sr.map(r=>[r.step,frac(r.val_scratch,'beat_original')])}],true);
 </script></main></body></html>"#;

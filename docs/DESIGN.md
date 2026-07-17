@@ -27,7 +27,8 @@ autoregressive+RL stack cannot do this as cleanly.
 Continuous time `t ∈ (0, 1]`, linear schedule. Each *generative* cell is
 independently replaced by `MASK` with probability `t`:
 
-- `t → 1`: (almost) the whole non-observed grid is masked.
+- `t = 1`: the whole non-observed grid is masked. A configurable 25% of
+  training examples use this exact state because sampling always starts there.
 - `t → 0`: nothing is masked.
 - **Observed cells are never masked** — that is what makes the process
   conditional. (`diffusion::apply_masking`.)
@@ -45,7 +46,8 @@ classes), so the model can tell "this channel is unknown" per channel.
 - A **conv stem** consuming the concatenated channel embeddings **plus the
   obstacle conditioning plane**.
 - A **residual conv tower**. Each block adds two things a plain conv can't get:
-  - a **global-context vector** (mean-pool over space → linear → broadcast),
+  - a **global-context vector** (concatenated mean+max pool over space → linear
+    → broadcast),
     which fixes the reference's receptive-field bottleneck — routing to a distant
     sink is a grid-global decision; and
   - a **time-conditioning vector** (sinusoidal `t` → MLP, FiLM-style add), so the
@@ -74,6 +76,13 @@ predicting empty everywhere. We counter this directly:
   up-weighted by `structure_weight` (default 8×). (`DiffusionConfig`.)
 - **Placement-recall metric**: entity accuracy *restricted to non-empty target
   cells* — the honest "is it learning to build?" number, reported every step.
+- **Assembler and recipe metrics**: anchor recall and item accuracy restricted
+  to assembler targets, so belts and `Item::None` cannot hide a machine failure.
+- **Assembler weighting is experimental**: `assembler_weight` defaults to the
+  neutral 1x. A hosted 8x comparison slightly improved the noisy
+  `ASSEMBLER_CHAOS` lesson but substantially hurt aggregate scratch behavior and
+  routing families; weighting could not repair a target that was not determined
+  by its conditioning.
 
 This is the most important design decision for *actually learning* rather than
 collapsing to the trivial empty solution. See `docs/ROADMAP.md`.

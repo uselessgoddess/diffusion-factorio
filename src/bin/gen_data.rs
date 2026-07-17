@@ -5,7 +5,7 @@
 //! Usage: `cargo run --bin gen_data -- --size 11 --count 2`
 
 use clap::Parser;
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::sim::item_reaches_sink;
 use diffusion_factorio::textual::render;
 use rand_chacha::rand_core::SeedableRng;
@@ -35,7 +35,7 @@ fn main() {
                 .seed
                 .wrapping_add((kind as u64) << 32)
                 .wrapping_add(i as u64);
-            let Some(sample) = generate(kind, args.size, seed) else {
+            let Some(sample) = generate(kind, Canvas::square(args.size), seed) else {
                 println!(
                     "[{}] (could not generate at size {})\n",
                     kind.name(),

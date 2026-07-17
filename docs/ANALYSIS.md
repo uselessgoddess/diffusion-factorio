@@ -53,6 +53,8 @@ The reference is a hybrid: a Python model/training stack (`factorion.py`,
 1. **The `FOOTPRINT` data leak.** In the reference, the buildable-footprint
    channel at one point effectively encoded *where the answer went* (only the
    correct placement cells were marked buildable), letting the model cheat.
+   This is history on both sides now — the reference has since fixed it upstream,
+   so read this entry as a design rationale rather than as a live criticism.
    → We make obstacles a **separate conditioning input** that never encodes where
    entities should go (`Grid::obstacle`), and it is *not* a generative channel.
    A blank grid has no obstacles by default.
@@ -60,8 +62,9 @@ The reference is a hybrid: a Python model/training stack (`factorion.py`,
 2. **Receptive-field bottleneck.** A purely local conv/window model cannot answer
    grid-global questions ("which way is the far-off sink?"), which caps layout
    quality. This is a real architectural limit the reference bumped into.
-   → Every residual block injects a **global-context vector** (mean-pool → linear
-   → broadcast), so global routing information is available everywhere
+   → Every residual block injects a **global-context vector** (mean+max pool →
+   linear → broadcast), so global routing information and sparse cues are
+   available everywhere
    (`src/model.rs`, `ResBlock`). See `docs/DESIGN.md`.
 
 3. **Autoregressive/RL sequ-of-tokens framing.** The reference leans on

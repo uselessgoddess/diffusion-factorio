@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use diffusion_factorio::factory_gen::{generate, LessonKind};
+use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::textual::render;
 use diffusion_factorio::throughput;
 use diffusion_factorio::world::{Entity, Grid};
@@ -50,7 +50,7 @@ fn main() {
     // Two samples sharing a conditioning are two answers to the same question.
     let mut by_task: BTreeMap<String, (Grid, BTreeMap<String, f64>)> = BTreeMap::new();
     for seed in 0..SEEDS {
-        let Some(sample) = generate(LessonKind::AssemblerBank, SIZE, seed) else {
+        let Some(sample) = generate(LessonKind::AssemblerBank, Canvas::square(SIZE), seed) else {
             continue;
         };
         // The blanking `train.rs` validates with, so the ambiguity shown here is

@@ -19,7 +19,7 @@ use burn::tensor::{Distribution, Int};
 
 use crate::data::GridBatch;
 use crate::model::Denoiser;
-use crate::world::{N_CHANNELS, VOCAB};
+use crate::world::{Entity, N_CHANNELS, VOCAB};
 
 #[derive(Config, Debug)]
 pub struct DiffusionConfig {
@@ -31,6 +31,15 @@ pub struct DiffusionConfig {
     /// Clamp `t` into `[t_min, 1]` to bound the `1/t` weight's variance.
     #[config(default = 0.02)]
     pub t_min: f64,
+    /// Fraction of examples trained at exactly `t = 1`, matching the fully
+    /// masked state from which reverse diffusion starts.
+    ///
+    /// A continuous draw from `[t_min, 1)` has zero probability of producing
+    /// that state. On a board with many answer cells, even a draw near one is
+    /// overwhelmingly unlikely to mask every cell at once, so scratch sampling
+    /// was an out-of-distribution input despite being the main evaluation mode.
+    #[config(default = 0.25)]
+    pub scratch_probability: f64,
     /// Loss weight multiplier for cells whose target entity is *not* `Empty`.
     ///
     /// The entity channel is ~95% `Empty`, so an unweighted objective is trivially
@@ -39,6 +48,12 @@ pub struct DiffusionConfig {
     /// bottleneck — see `docs/ROADMAP.md`. `1.0` disables the reweighting.
     #[config(default = 8.0)]
     pub structure_weight: f64,
+    /// Experimental loss multiplier for an assembler anchor, after the general
+    /// non-empty-cell weight. `1.0` is deliberately neutral: weighting cannot
+    /// repair a machine target chosen independently of the visible task, and
+    /// amplifying that label noise harms the routing lessons.
+    #[config(default = 1.0)]
+    pub assembler_weight: f64,
 }
 
 /// Detached statistics from a training step, for metrics/logging.
@@ -54,6 +69,13 @@ pub struct StepStats {
     pub placement_correct: f64,
     /// Masked cells whose target entity is non-empty (denominator above).
     pub placement_total: f64,
+    /// Correct entity predictions specifically on assembler anchors.
+    pub assembler_correct: f64,
+    /// Masked assembler anchors (denominator for assembler recall and recipe
+    /// accuracy).
+    pub assembler_total: f64,
+    /// Correct item/recipe predictions on masked assembler anchors.
+    pub recipe_correct: f64,
     /// Mean masking rate `t` this step.
     pub t_mean: f64,
     /// Mean per-cell NLL over masked cells (unweighted).
@@ -78,6 +100,20 @@ impl StepStats {
             0.0
         }
     }
+    pub fn assembler_acc(&self) -> f64 {
+        if self.assembler_total > 0.0 {
+            self.assembler_correct / self.assembler_total
+        } else {
+            0.0
+        }
+    }
+    pub fn recipe_acc(&self) -> f64 {
+        if self.assembler_total > 0.0 {
+            self.recipe_correct / self.assembler_total
+        } else {
+            0.0
+        }
+    }
 }
 
 /// The masking applied to a batch: the model input and which cells were masked.
@@ -90,16 +126,42 @@ pub struct Masked<B: Backend> {
     pub t: Tensor<B, 1>,
 }
 
+fn loss_weights<B: Backend>(
+    entity_target: Tensor<B, 3, Int>,
+    mask: Tensor<B, 3>,
+    cfg: &DiffusionConfig,
+) -> Tensor<B, 3> {
+    let non_empty = entity_target.clone().greater_elem(0).float();
+    let assembler = entity_target.equal_elem(Entity::Assembler as i32).float();
+    let structure = non_empty
+        .mul_scalar(cfg.structure_weight - 1.0)
+        .add_scalar(1.0);
+    let machine = assembler
+        .mul_scalar(cfg.assembler_weight - 1.0)
+        .add_scalar(1.0);
+    structure.mul(machine).mul(mask)
+}
+
 /// Apply the forward (noising) process to a clean batch.
 ///
 /// Observed cells (`batch.observed`) are never masked — that is what makes the
 /// process conditional / an inpainter.
-pub fn apply_masking<B: Backend>(batch: &GridBatch<B>, t_min: f64) -> Masked<B> {
+pub fn apply_masking<B: Backend>(batch: &GridBatch<B>, cfg: &DiffusionConfig) -> Masked<B> {
     let device = batch.tokens.device();
     let [n, _c, h, w] = batch.tokens.dims();
 
-    // Per-sample masking rate t ~ U(t_min, 1).
-    let t = Tensor::<B, 1>::random([n], Distribution::Uniform(t_min, 1.0), &device);
+    assert!(
+        (0.0..=1.0).contains(&cfg.scratch_probability),
+        "scratch_probability must be in [0, 1]"
+    );
+
+    // Most examples use t ~ U(t_min, 1). A configurable fraction are set to
+    // exactly one so training includes the reverse process's initial state.
+    let random_t = Tensor::<B, 1>::random([n], Distribution::Uniform(cfg.t_min, 1.0), &device);
+    let scratch = Tensor::<B, 1>::random([n], Distribution::Uniform(0.0, 1.0), &device)
+        .lower_elem(cfg.scratch_probability)
+        .float();
+    let t = random_t.mul(scratch.clone().neg().add_scalar(1.0)) + scratch;
     let t_full = Tensor::<B, 3>::zeros([n, h, w], &device) + t.clone().reshape([n, 1, 1]);
 
     // Bernoulli(t) per cell, then exclude observed cells.
@@ -137,7 +199,7 @@ pub fn loss<B: Backend>(
     batch: &GridBatch<B>,
     cfg: &DiffusionConfig,
 ) -> (Tensor<B, 1>, StepStats) {
-    let masked = apply_masking(batch, cfg.t_min);
+    let masked = apply_masking(batch, cfg);
     let logits = model.forward(masked.input, batch.obstacle.clone(), masked.t.clone());
 
     let [n, _c, h, w] = batch.tokens.dims();
@@ -152,11 +214,12 @@ pub fn loss<B: Backend>(
         .slice([0..n, 0..1, 0..h, 0..w])
         .reshape([n, h, w]);
     let non_empty = entity_target.clone().greater_elem(0).float(); // [n,h,w] in {0,1}
-    let weight = non_empty
+    let assembler = entity_target
         .clone()
-        .mul_scalar(cfg.structure_weight - 1.0)
-        .add_scalar(1.0)
-        .mul(mask.clone()); // 0 on unmasked cells
+        .equal_elem(Entity::Assembler as i32)
+        .float();
+    let assembler_mask = assembler.mul(mask.clone());
+    let weight = loss_weights(entity_target, mask.clone(), cfg); // 0 on unmasked cells
     let w_sum = weight.clone().sum(); // total weight (scalar tensor)
     let n_masked = mask.clone().sum();
 
@@ -184,8 +247,14 @@ pub fn loss<B: Backend>(
         if c == 0 {
             // Placement recall: entity hits on masked, non-empty target cells.
             let placement_mask = non_empty.clone().mul(mask.clone());
-            stats.placement_correct = scalar(hit.mul(placement_mask.clone()).sum());
+            stats.placement_correct = scalar(hit.clone().mul(placement_mask.clone()).sum());
             stats.placement_total = scalar(placement_mask.sum());
+            stats.assembler_correct = scalar(hit.mul(assembler_mask.clone()).sum());
+            stats.assembler_total = scalar(assembler_mask.clone().sum());
+        } else if c == 2 {
+            // The item channel on an assembler is its recipe. Accuracy over all
+            // item cells is mostly `None` and concealed the recipe blind spot.
+            stats.recipe_correct = scalar(hit.mul(assembler_mask.clone()).sum());
         }
         let channel_nll = scalar(raw_nll.mul(mask.clone()).sum());
         stats.channel_nll[c] = channel_nll;
@@ -222,14 +291,38 @@ fn scalar<B: Backend, const D: usize>(t: Tensor<B, D>) -> f64 {
 mod tests {
     use super::*;
     use crate::backend::CpuBackend;
-    use crate::factory_gen::{generate, LessonKind};
+    use crate::factory_gen::{generate, Canvas, LessonKind};
     use crate::model::DenoiserConfig;
+
+    #[test]
+    fn assembler_anchors_get_dedicated_loss_weight() {
+        type B = CpuBackend;
+        let device = Default::default();
+        let entity = Tensor::<B, 1, Int>::from_ints(
+            [
+                Entity::Empty as i32,
+                Entity::TransportBelt as i32,
+                Entity::Assembler as i32,
+            ],
+            &device,
+        )
+        .reshape([1, 1, 3]);
+        let mask = Tensor::<B, 3>::ones([1, 1, 3], &device);
+        let cfg = DiffusionConfig::new();
+
+        let values: Vec<f32> = loss_weights(entity, mask, &cfg)
+            .to_data()
+            .convert::<f32>()
+            .into_vec()
+            .unwrap();
+        assert_eq!(values, vec![1.0, 8.0, 8.0]);
+    }
 
     #[test]
     fn masking_leaves_observed_cells_untouched() {
         type B = CpuBackend;
         let device = Default::default();
-        let s = generate(LessonKind::MoveOneItem, 11, 5).unwrap();
+        let s = generate(LessonKind::MoveOneItem, Canvas::square(11), 5).unwrap();
         let observed: Vec<bool> = (0..s.solution.len())
             .map(|i| s.protected.contains(&i))
             .collect();
@@ -238,7 +331,10 @@ mod tests {
             Some(std::slice::from_ref(&observed)),
             &device,
         );
-        let masked = apply_masking(&batch, 0.9); // high t -> most non-observed masked
+        let cfg = DiffusionConfig::new()
+            .with_t_min(0.9)
+            .with_scratch_probability(0.0);
+        let masked = apply_masking(&batch, &cfg); // high t -> most non-observed masked
         let mask_data: Vec<f32> = masked.mask.to_data().convert::<f32>().into_vec().unwrap();
         // Observed cells are never masked.
         for (i, &o) in observed.iter().enumerate() {
@@ -249,10 +345,36 @@ mod tests {
     }
 
     #[test]
+    fn scratch_examples_mask_every_answer_but_never_the_task_anchors() {
+        type B = CpuBackend;
+        let device = Default::default();
+        let s = generate(LessonKind::AssemblerLine, Canvas::square(11), 5).unwrap();
+        let (_, observed) = s.blank_to_scaffold();
+        let batch = GridBatch::<B>::from_grids(
+            std::slice::from_ref(&s.solution),
+            Some(std::slice::from_ref(&observed)),
+            &device,
+        );
+        let cfg = DiffusionConfig::new().with_scratch_probability(1.0);
+        let masked = apply_masking(&batch, &cfg);
+        let mask: Vec<f32> = masked.mask.to_data().convert::<f32>().into_vec().unwrap();
+        let times: Vec<f32> = masked.t.to_data().convert::<f32>().into_vec().unwrap();
+
+        assert_eq!(times, vec![1.0]);
+        for (i, &anchor) in observed.iter().enumerate() {
+            assert_eq!(
+                mask[i],
+                if anchor { 0.0 } else { 1.0 },
+                "wrong scratch mask at cell {i}"
+            );
+        }
+    }
+
+    #[test]
     fn loss_is_finite_and_positive() {
         type B = CpuBackend;
         let device = Default::default();
-        let s = generate(LessonKind::MoveOneItem, 11, 1).unwrap();
+        let s = generate(LessonKind::MoveOneItem, Canvas::square(11), 1).unwrap();
         let batch = GridBatch::<B>::from_grids(std::slice::from_ref(&s.solution), None, &device);
         let model = DenoiserConfig::new()
             .with_hidden(16)

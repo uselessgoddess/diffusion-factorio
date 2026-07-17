@@ -415,6 +415,19 @@ impl Cell {
             Channel::Misc => self.misc as usize,
         }
     }
+    /// Rebuild a cell from one category id per channel, in [`Channel`] order.
+    ///
+    /// Returns `None` if any id is out of range for its channel — notably the
+    /// diffusion MASK id, which lives at `VOCAB[c]` and is never a real class.
+    pub fn from_ids(ids: [usize; N_CHANNELS]) -> Option<Self> {
+        Some(Self {
+            entity: Entity::from_id(ids[0])?,
+            direction: Direction::from_id(ids[1])?,
+            item: Item::from_id(ids[2])?,
+            misc: Misc::from_id(ids[3])?,
+        })
+    }
+
     /// Whether channels are mutually consistent (a legal cell). Used by
     /// validation metrics to score whether a decoded factory is well-formed.
     pub fn is_consistent(&self) -> bool {
@@ -437,8 +450,66 @@ impl Cell {
         if has_item && !item_bearing {
             return false;
         }
+        // An assembler's tag *is* its recipe, so a tag that names no recipe
+        // leaves a nine-tile machine that cannot craft: `sim::emits` returns
+        // nothing for it, and `blueprint.rs` exports an `assembling-machine-1`
+        // with no `recipe` field — one you would have to click a recipe into by
+        // hand before the pasted factory did anything.
+        //
+        // This rule is why the check is not symmetric with `Source`/`Sink`,
+        // which stay legal untagged: there, `Item::None` *means* something — no
+        // filter, accepts or offers anything (`sim::sink_accepts`). On an
+        // assembler it means nothing at all. `Item::IronPlate` is rejected for
+        // the same reason and not a different one: a plate is smelted, no
+        // assembler recipe produces it, so tagging a machine with it is the
+        // same dead cell wearing a different id.
+        //
+        // Without this the issue's first example passes every legality check we
+        // have while delivering 0.000/s (`experiments/issue_examples`), and
+        // `sample::decode_cell` — which only ever picks from this table — would
+        // keep proposing the dead cell as a perfectly good answer.
+        if self.entity == Entity::Assembler && self.item.recipe().is_none() {
+            return false;
+        }
         true
     }
+}
+
+/// Every combination of channel categories that [`Cell::is_consistent`] accepts,
+/// in `[entity, direction, item, misc]` id order.
+///
+/// The product of the four vocabularies is 8·5·6·3 = 720 combinations, of which
+/// only **45** are legal cells. The other 675 are not rare or unlikely — they do
+/// not exist. `TransportBelt` with `Direction::None` is one of them, and it is
+/// what a decoder that picks each channel independently emits whenever the
+/// entity head is sure something is there while the direction head is unsure
+/// which way it faces: the belt's probability mass is split across four
+/// directions, `None`'s is not, so `None` wins the direction argmax on a
+/// plurality while `TransportBelt` wins the entity argmax on a majority. The two
+/// heads are each individually right and the cell they agree on cannot be built.
+///
+/// Enumerating the legal set once lets [`crate::sample`] decode the most likely
+/// *legal* cell instead of the product of four separately-most-likely channels.
+/// The table is small enough to scan per cell (45 × 4 lookups) and exact enough
+/// that no legal factory is ever excluded.
+pub fn legal_cells() -> &'static [[usize; N_CHANNELS]] {
+    static LEGAL: std::sync::OnceLock<Vec<[usize; N_CHANNELS]>> = std::sync::OnceLock::new();
+    LEGAL.get_or_init(|| {
+        let mut out = Vec::new();
+        for e in 0..VOCAB[0] {
+            for d in 0..VOCAB[1] {
+                for i in 0..VOCAB[2] {
+                    for m in 0..VOCAB[3] {
+                        let ids = [e, d, i, m];
+                        if Cell::from_ids(ids).is_some_and(|c| c.is_consistent()) {
+                            out.push(ids);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    })
 }
 
 /// A fixed-size factory grid stored row-major (`idx = y * width + x`).
@@ -607,6 +678,123 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The legal set is the whole reason constrained decoding is cheap: it is a
+    /// 45-row table, not a search. If a channel gains a category this number
+    /// moves, and that is worth noticing rather than absorbing silently.
+    #[test]
+    fn only_forty_five_of_seven_hundred_and_twenty_cells_are_legal() {
+        let total: usize = VOCAB.iter().product();
+        assert_eq!(total, 720);
+        assert_eq!(legal_cells().len(), 45);
+        // Per entity: Empty 1, Source 6, Sink 6, belt 4, underground 4×2,
+        // splitter 4, inserter 4, assembler 4×3 (only the craftables: a
+        // machine tagged with a plate, or with nothing, has no recipe to run).
+        let per_entity = |e: Entity| {
+            legal_cells()
+                .iter()
+                .filter(|ids| ids[0] == e as usize)
+                .count()
+        };
+        assert_eq!(per_entity(Entity::Empty), 1);
+        assert_eq!(per_entity(Entity::Source), 6);
+        assert_eq!(per_entity(Entity::Sink), 6);
+        assert_eq!(per_entity(Entity::TransportBelt), 4);
+        assert_eq!(per_entity(Entity::UndergroundBelt), 8);
+        assert_eq!(per_entity(Entity::Splitter), 4);
+        assert_eq!(per_entity(Entity::Inserter), 4);
+        assert_eq!(per_entity(Entity::Assembler), 12);
+    }
+
+    /// A machine with no recipe is not a machine.
+    ///
+    /// This is the fault the issue's first example was built on: every cell of
+    /// it passes `is_consistent`, the blueprint imports, and it delivers
+    /// 0.000/s, because the assembler carries no recipe and
+    /// [`crate::sim::emits`] has nothing to craft. A legality check that blesses
+    /// it teaches `consistent` to score a dead factory full marks, and hands
+    /// [`crate::sample::decode_cell`] a dead cell to choose from.
+    #[test]
+    fn an_assembler_without_a_recipe_is_not_a_legal_cell() {
+        let machine = |item| Cell {
+            entity: Entity::Assembler,
+            direction: Direction::East,
+            item,
+            misc: Misc::None,
+        };
+        // Untagged, and tagged with something no assembler can craft.
+        assert!(!machine(Item::None).is_consistent());
+        assert!(!machine(Item::IronPlate).is_consistent());
+        assert!(!machine(Item::CopperPlate).is_consistent());
+        // Tagged with a real recipe.
+        for item in Item::craftable() {
+            assert!(machine(item).is_consistent(), "{item:?} is craftable");
+        }
+        // A port is the asymmetric case, and stays legal untagged: there
+        // `Item::None` means "no filter" rather than "nothing to do".
+        for entity in [Entity::Source, Entity::Sink] {
+            let port = Cell {
+                entity,
+                direction: Direction::None,
+                item: Item::None,
+                misc: Misc::None,
+            };
+            assert!(port.is_consistent(), "{entity:?} may go untagged");
+        }
+        // And nothing in the table the decoder picks from can be a dead machine.
+        for ids in legal_cells() {
+            let cell = Cell::from_ids(*ids).unwrap();
+            if cell.entity == Entity::Assembler {
+                assert!(
+                    cell.item.recipe().is_some(),
+                    "dead machine in table: {cell:?}"
+                );
+            }
+        }
+    }
+
+    /// Every row of the table is a cell you can actually build, and every cell
+    /// you can build is in the table. The second half is what makes constrained
+    /// decoding lossless rather than merely safe.
+    #[test]
+    fn the_legal_table_is_exactly_the_consistent_cells() {
+        let table: std::collections::HashSet<_> = legal_cells().iter().copied().collect();
+        for e in 0..VOCAB[0] {
+            for d in 0..VOCAB[1] {
+                for i in 0..VOCAB[2] {
+                    for m in 0..VOCAB[3] {
+                        let ids = [e, d, i, m];
+                        let cell = Cell::from_ids(ids).expect("ids are in range");
+                        assert_eq!(
+                            table.contains(&ids),
+                            cell.is_consistent(),
+                            "table and is_consistent disagree about {cell:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The cell the user's export kept rejecting. Named so the next person to
+    /// see `cannot export inconsistent cell` can grep for it.
+    #[test]
+    fn a_belt_facing_nowhere_is_not_a_cell() {
+        let ids = [
+            Entity::TransportBelt as usize,
+            Direction::None as usize,
+            0,
+            0,
+        ];
+        assert!(!Cell::from_ids(ids).unwrap().is_consistent());
+        assert!(!legal_cells().contains(&ids));
+    }
+
+    /// MASK is not a class, so it must not decode to a cell.
+    #[test]
+    fn the_mask_id_is_not_a_category() {
+        assert!(Cell::from_ids([VOCAB[0], 0, 0, 0]).is_none());
+    }
 
     fn assembler() -> Cell {
         Cell {

@@ -20,7 +20,7 @@
 //! grades well but never appears in a lesson is one the model has never seen.
 
 use diffusion_factorio::{
-    factory_gen::{generate, LessonKind, BANK_LINES},
+    factory_gen::{generate, Canvas, LessonKind, BANK_LINES},
     sim, textual,
     throughput::{throughput, BELT_RATE},
     world::{Cell, Direction, Entity, Grid, Item},
@@ -175,7 +175,7 @@ fn census() {
         let mut counts = [0usize; Entity::COUNT];
         let mut factories = 0usize;
         for seed in 0..200u64 {
-            let Some(s) = generate(kind, 11, seed) else {
+            let Some(s) = generate(kind, Canvas::square(11), seed) else {
                 continue;
             };
             factories += 1;

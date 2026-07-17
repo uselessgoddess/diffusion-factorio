@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use diffusion_factorio::diffusion::DiffusionConfig;
+use diffusion_factorio::factory_gen::{Canvas, DEFAULT_CANVAS_MAX, DEFAULT_CANVAS_MIN};
 use diffusion_factorio::model::DenoiserConfig;
 use diffusion_factorio::observability::{write_training_report, MetricsWriter, RunMetadata};
 use diffusion_factorio::persist;
@@ -20,8 +21,20 @@ type TrainBackend = diffusion_factorio::backend::CpuAutodiff;
 #[derive(Parser)]
 #[command(about = "Train the masked-diffusion factory denoiser")]
 struct Args {
-    #[arg(long, default_value_t = 11)]
-    size: usize,
+    /// Train on one square canvas of this side, instead of the shape pool.
+    ///
+    /// This is the old square-only curriculum, kept because it is the control
+    /// the shape-mixed default has to beat. It is not a good way to train:
+    /// see `docs/GENERALIZATION.md` cause 5.
+    #[arg(long)]
+    size: Option<usize>,
+    /// Shortest canvas side the curriculum draws.
+    #[arg(long, default_value_t = DEFAULT_CANVAS_MIN)]
+    canvas_min: usize,
+    /// Longest canvas side the curriculum draws. Every width x height in
+    /// `canvas_min..=canvas_max` is drawn from, one shape per batch.
+    #[arg(long, default_value_t = DEFAULT_CANVAS_MAX)]
+    canvas_max: usize,
     #[arg(long, default_value_t = 5000)]
     steps: usize,
     #[arg(long, default_value_t = 32)]
@@ -50,11 +63,23 @@ struct Args {
     /// Minimum sampled diffusion time (bounds ELBO variance).
     #[arg(long, default_value_t = 0.02)]
     t_min: f64,
+    /// Fraction of batches trained from the exact fully masked start state.
+    #[arg(long, default_value_t = 0.25)]
+    scratch_probability: f64,
     /// Extra loss weight for non-empty cells (prevents empty collapse).
     #[arg(long, default_value_t = 8.0)]
     structure_weight: f64,
+    /// Experimental extra assembler-anchor weight (1 keeps it neutral).
+    #[arg(long, default_value_t = 1.0)]
+    assembler_weight: f64,
     #[arg(long, default_value_t = 0)]
     seed: u64,
+    /// Reproduce the old answer-leaking scaffold for an A/B control only.
+    #[arg(long, default_value_t = false)]
+    legacy_protected_scaffold: bool,
+    /// Omit the obstacle-free arbitrary-assembler bridge for a controlled A/B.
+    #[arg(long, default_value_t = false)]
+    no_assembler_open: bool,
     /// Checkpoint path prefix (writes `<out>.mpk` + `<out>.json`).
     #[arg(long, default_value = "checkpoints/denoiser")]
     out: PathBuf,
@@ -66,6 +91,21 @@ struct Args {
     report_out: PathBuf,
 }
 
+/// A pool of shapes, short enough for a log line and a report card.
+fn canvas_summary(canvases: &[Canvas]) -> String {
+    match canvases {
+        [] => "none".to_owned(),
+        [one] => one.to_string(),
+        many => {
+            let min_w = many.iter().map(|c| c.width).min().unwrap_or(0);
+            let max_w = many.iter().map(|c| c.width).max().unwrap_or(0);
+            let min_h = many.iter().map(|c| c.height).min().unwrap_or(0);
+            let max_h = many.iter().map(|c| c.height).max().unwrap_or(0);
+            format!("{min_w}x{min_h} .. {max_w}x{max_h}")
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let device: burn::tensor::Device<TrainBackend> = Default::default();
@@ -73,8 +113,12 @@ fn main() -> anyhow::Result<()> {
     let model_cfg = DenoiserConfig::new()
         .with_hidden(args.hidden)
         .with_blocks(args.blocks);
+    let canvases = match args.size {
+        Some(side) => vec![Canvas::square(side)],
+        None => Canvas::pool(args.canvas_min, args.canvas_max),
+    };
     let cfg = TrainConfig {
-        grid_size: args.size,
+        canvases,
         steps: args.steps,
         batch_size: args.batch,
         lr: args.lr,
@@ -84,11 +128,15 @@ fn main() -> anyhow::Result<()> {
         val_batch: args.val_batch,
         sample_steps: args.sample_steps,
         seed: args.seed,
+        legacy_protected_scaffold: args.legacy_protected_scaffold,
+        include_assembler_open: !args.no_assembler_open,
         model: model_cfg.clone(),
         diffusion: DiffusionConfig::new()
             .with_elbo_weight(args.elbo)
             .with_t_min(args.t_min)
-            .with_structure_weight(args.structure_weight),
+            .with_scratch_probability(args.scratch_probability)
+            .with_structure_weight(args.structure_weight)
+            .with_assembler_weight(args.assembler_weight),
     };
 
     println!(
@@ -100,8 +148,10 @@ fn main() -> anyhow::Result<()> {
         }
     );
     println!(
-        "training {} steps on {}x{} grids...",
-        cfg.steps, cfg.grid_size, cfg.grid_size
+        "training {} steps on {} canvas shape(s): {}...",
+        cfg.steps,
+        cfg.canvases.len(),
+        canvas_summary(&cfg.canvases)
     );
 
     let mut metrics_writer = MetricsWriter::create(&args.metrics_out)?;
@@ -121,12 +171,14 @@ fn main() -> anyhow::Result<()> {
         } else {
             "ndarray (CPU)".to_owned()
         },
-        grid_size: cfg.grid_size,
+        canvases: canvas_summary(&cfg.canvases),
         steps: cfg.steps,
         batch_size: cfg.batch_size,
         val_batch: cfg.val_batch,
         sample_steps: cfg.sample_steps,
         seed: cfg.seed,
+        legacy_protected_scaffold: cfg.legacy_protected_scaffold,
+        include_assembler_open: cfg.include_assembler_open,
         peak_lr: cfg.lr,
         warmup_steps: cfg.warmup,
         grad_clip: cfg.grad_clip,
@@ -136,7 +188,9 @@ fn main() -> anyhow::Result<()> {
         time_dim: cfg.model.time_dim,
         elbo_weight: cfg.diffusion.elbo_weight,
         t_min: cfg.diffusion.t_min,
+        scratch_probability: cfg.diffusion.scratch_probability,
         structure_weight: cfg.diffusion.structure_weight,
+        assembler_weight: cfg.diffusion.assembler_weight,
     };
     write_training_report(&args.report_out, &metadata, &logs)?;
 

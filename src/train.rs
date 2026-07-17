@@ -20,7 +20,9 @@ use std::time::Instant;
 
 use crate::data::GridBatch;
 use crate::diffusion::{loss, DiffusionConfig};
-use crate::factory_gen::{generate, LessonKind, Sample};
+use crate::factory_gen::{
+    generate, Canvas, LessonKind, Sample, DEFAULT_CANVAS_MAX, DEFAULT_CANVAS_MIN,
+};
 use crate::metrics::{reconstruction_report, ReconReport};
 use crate::model::{Denoiser, DenoiserConfig};
 use crate::sample::{reconstruct, SampleConfig};
@@ -29,7 +31,20 @@ use crate::world::Grid;
 /// Everything needed to run a training session.
 #[derive(Clone, Debug)]
 pub struct TrainConfig {
-    pub grid_size: usize,
+    /// The canvas shapes to train on. One is drawn per batch, uniformly.
+    ///
+    /// This used to be a single `grid_size: usize` and every lesson was built on
+    /// a square of that side, which is the whole of cause 5 in
+    /// `docs/GENERALIZATION.md`: the issue trains on 11×11, infers on 13×9, and
+    /// the same task drops from 3.118 items/s to 0.478 for no reason but the
+    /// shape of the canvas around it. A model shown one shape has no way to know
+    /// the shape was not part of the task.
+    ///
+    /// Drawn per *batch* rather than per sample because `GridBatch` is a single
+    /// tensor and asserts against a ragged batch. That costs nothing: the shape
+    /// still varies across a run, which is the axis the model has to generalize
+    /// over.
+    pub canvases: Vec<Canvas>,
     /// Number of optimizer steps.
     pub steps: usize,
     pub batch_size: usize,
@@ -50,6 +65,12 @@ pub struct TrainConfig {
     /// Reverse-diffusion rounds used during validation.
     pub sample_steps: usize,
     pub seed: u64,
+    /// Reproduce the historical target-leaking conditioning for controlled
+    /// experiments. Production training must leave this false.
+    pub legacy_protected_scaffold: bool,
+    /// Include the obstacle-free arbitrary-assembler curriculum rung.
+    /// Production leaves this true; false is the exact hosted A/B control.
+    pub include_assembler_open: bool,
     pub model: DenoiserConfig,
     pub diffusion: DiffusionConfig,
 }
@@ -57,7 +78,7 @@ pub struct TrainConfig {
 impl Default for TrainConfig {
     fn default() -> Self {
         Self {
-            grid_size: 11,
+            canvases: Canvas::pool(DEFAULT_CANVAS_MIN, DEFAULT_CANVAS_MAX),
             steps: 2000,
             batch_size: 32,
             lr: 3e-4,
@@ -67,6 +88,8 @@ impl Default for TrainConfig {
             val_batch: 512,
             sample_steps: 12,
             seed: 0,
+            legacy_protected_scaffold: false,
+            include_assembler_open: true,
             model: DenoiserConfig::new(),
             diffusion: DiffusionConfig::new(),
         }
@@ -86,6 +109,10 @@ pub struct TrainLog {
     /// Entity placement recall (accuracy on masked non-empty cells) — the honest
     /// "is it learning to build?" signal, immune to the empty-cell majority.
     pub placement_acc: f64,
+    /// Entity accuracy restricted to masked assembler anchors.
+    pub assembler_acc: f64,
+    /// Item/recipe accuracy restricted to masked assembler anchors.
+    pub recipe_acc: f64,
     /// Mean sampled diffusion time (masking rate) for the batch.
     pub t_mean: f64,
     /// Unweighted negative log-likelihood on masked cells.
@@ -140,9 +167,23 @@ where
     let validation = (cfg.val_every > 0).then(|| build_validation_set(cfg));
     let started = Instant::now();
 
+    assert!(
+        !cfg.canvases.is_empty(),
+        "a curriculum with no canvas to build on"
+    );
     for step in 0..cfg.steps {
-        let (grids, observed) =
-            train_batch(cfg.grid_size, cfg.batch_size, &mut data_rng, &mut seed_ctr);
+        // One shape for the whole batch: `GridBatch` is one tensor and rejects a
+        // ragged one. Across steps the shape still varies, which is the axis
+        // that matters.
+        let canvas = cfg.canvases[data_rng.gen_range(0..cfg.canvases.len())];
+        let (grids, observed) = train_batch(
+            canvas,
+            cfg.batch_size,
+            &mut data_rng,
+            &mut seed_ctr,
+            cfg.legacy_protected_scaffold,
+            cfg.include_assembler_open,
+        );
         let batch = GridBatch::<B>::from_grids(&grids, Some(&observed), device);
 
         let (loss_t, stats) = loss(&model, &batch, &cfg.diffusion);
@@ -180,17 +221,21 @@ where
         };
 
         let placement_acc = stats.placement_acc();
+        let assembler_acc = stats.assembler_acc();
+        let recipe_acc = stats.recipe_acc();
         let elapsed_seconds = started.elapsed().as_secs_f64();
         let samples_seen = (step + 1) * cfg.batch_size;
         let samples_per_second = samples_seen as f64 / elapsed_seconds.max(f64::EPSILON);
         if is_val || step == 0 {
             let mut line = format!(
-                "step {:>5}/{} | lr {:.2e} | loss {:.4} | place {:.2} | acc[E={:.2} D={:.2} I={:.2} M={:.2}]",
+                "step {:>5}/{} | lr {:.2e} | loss {:.4} | place {:.2} asm {:.2} recipe {:.2} | acc[E={:.2} D={:.2} I={:.2} M={:.2}]",
                 step + 1,
                 cfg.steps,
                 lr,
                 loss_v,
                 placement_acc,
+                assembler_acc,
+                recipe_acc,
                 train_acc[0],
                 train_acc[1],
                 train_acc[2],
@@ -218,6 +263,8 @@ where
             loss: loss_v,
             train_acc,
             placement_acc,
+            assembler_acc,
+            recipe_acc,
             t_mean: stats.t_mean,
             nll: stats.nll,
             channel_nll: stats.channel_nll,
@@ -247,43 +294,85 @@ fn lr_at(step: usize, cfg: &TrainConfig) -> f64 {
     cfg.lr * cos
 }
 
-/// Kinds that can be generated at a given grid size.
-fn feasible_kinds(size: usize) -> Vec<LessonKind> {
+/// Kinds that can be generated on a given canvas.
+///
+/// Asked per axis, not against the longer side. That is the difference between
+/// a 13×9 canvas offering the whole curriculum and offering only eight of ten
+/// families: a circuit line is 11×5 and a shared line 11×7, and both fit 13×9
+/// with room to spare — under one square number they were billed as needing 11
+/// rows apiece and ruled out.
+pub fn feasible_kinds(canvas: Canvas) -> Vec<LessonKind> {
     LessonKind::all()
         .iter()
         .copied()
-        .filter(|k| size >= k.min_size())
+        .filter(|k| k.fits(canvas))
         .collect()
 }
 
-/// Draw a single functional lesson, retrying kinds/seeds until one validates.
-fn draw_sample(size: usize, rng: &mut ChaCha8Rng, seed_ctr: &mut u64) -> Sample {
-    let kinds = feasible_kinds(size);
+/// Every kind some canvas in the pool can hold.
+///
+/// A union rather than an intersection: a pool is a set of shapes the model must
+/// handle, and a family that only fits the wider ones is still part of the
+/// curriculum. `draw_sample` never offers a kind to a canvas it does not fit.
+pub fn curriculum_kinds(canvases: &[Canvas]) -> Vec<LessonKind> {
+    LessonKind::all()
+        .iter()
+        .copied()
+        .filter(|k| canvases.iter().any(|c| k.fits(*c)))
+        .collect()
+}
+
+/// The production family set, with one narrow switch for the hosted bridge A/B.
+fn training_kinds(canvas: Canvas, include_assembler_open: bool) -> Vec<LessonKind> {
+    feasible_kinds(canvas)
+        .into_iter()
+        .filter(|kind| include_assembler_open || *kind != LessonKind::AssemblerOpen)
+        .collect()
+}
+
+fn draw_sample_from(
+    canvas: Canvas,
+    rng: &mut ChaCha8Rng,
+    seed_ctr: &mut u64,
+    include_assembler_open: bool,
+) -> Sample {
+    // Draw a single functional lesson, retrying kinds/seeds until one validates.
+    let kinds = training_kinds(canvas, include_assembler_open);
     loop {
         let kind = kinds[rng.gen_range(0..kinds.len())];
         let seed = *seed_ctr;
         *seed_ctr += 1;
-        if let Some(s) = generate(kind, size, seed) {
+        if let Some(s) = generate(kind, canvas, seed) {
             return s;
         }
     }
 }
 
-/// A training batch: solution grids + `observed` masks (the protected scaffold is
-/// always visible; the diffusion process masks a random subset of the rest).
+/// A training batch: solution grids + task-only `observed` masks.
+///
+/// Training uses the same source/sink conditioning as scratch validation. The
+/// lesson's `protected` list belongs to partial-inpainting data generation; it
+/// may include answer cells such as an assembler recipe and must not become the
+/// task conditioning mask.
 fn train_batch(
-    size: usize,
+    canvas: Canvas,
     batch: usize,
     rng: &mut ChaCha8Rng,
     seed_ctr: &mut u64,
+    legacy_protected_scaffold: bool,
+    include_assembler_open: bool,
 ) -> (Vec<Grid>, Vec<Vec<bool>>) {
     let mut grids = Vec::with_capacity(batch);
     let mut observed = Vec::with_capacity(batch);
     for _ in 0..batch {
-        let s = draw_sample(size, rng, seed_ctr);
-        let obs: Vec<bool> = (0..s.solution.len())
-            .map(|i| s.protected.contains(&i))
-            .collect();
+        let s = draw_sample_from(canvas, rng, seed_ctr, include_assembler_open);
+        let obs = if legacy_protected_scaffold {
+            (0..s.solution.len())
+                .map(|i| s.protected.contains(&i))
+                .collect()
+        } else {
+            s.blank_to_scaffold().1
+        };
         grids.push(s.solution);
         observed.push(obs);
     }
@@ -310,7 +399,10 @@ struct ValidationSet {
 /// exact same tasks.
 fn build_validation_set(cfg: &TrainConfig) -> ValidationSet {
     let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed ^ 0x05EE_DF12_EDA7_A5E7);
-    let kinds = feasible_kinds(cfg.grid_size);
+    let kinds: Vec<LessonKind> = curriculum_kinds(&cfg.canvases)
+        .into_iter()
+        .filter(|kind| cfg.include_assembler_open || *kind != LessonKind::AssemblerOpen)
+        .collect();
     let mut seed_ctr = cfg.seed ^ 0x0DD0_0DD0_0DD0_0DD0;
     let mut originals = Vec::with_capacity(cfg.val_batch);
     let mut partials = Vec::with_capacity(cfg.val_batch);
@@ -321,10 +413,22 @@ fn build_validation_set(cfg: &TrainConfig) -> ValidationSet {
 
     for i in 0..cfg.val_batch {
         let kind = kinds[i % kinds.len()];
+        // Cycle the shapes this kind fits on, independently per kind, so the
+        // held-out corpus scores every family on every canvas it can occupy
+        // rather than on one lucky shape. A validation set that is square when
+        // the curriculum is not would report a generalization the run never has
+        // to earn.
+        let shapes: Vec<Canvas> = cfg
+            .canvases
+            .iter()
+            .copied()
+            .filter(|c| kind.fits(*c))
+            .collect();
+        let canvas = shapes[(i / kinds.len()) % shapes.len()];
         let sample = loop {
             let seed = seed_ctr;
             seed_ctr = seed_ctr.wrapping_add(1);
-            if let Some(sample) = generate(kind, cfg.grid_size, seed) {
+            if let Some(sample) = generate(kind, canvas, seed) {
                 break sample;
             }
         };
@@ -346,6 +450,20 @@ fn build_validation_set(cfg: &TrainConfig) -> ValidationSet {
         scratch_observed,
         kinds: selected_kinds,
     }
+}
+
+/// Families actually represented in a validation corpus.
+///
+/// This differs from the canvas-wide curriculum during narrow A/B controls:
+/// the canvas can fit `ASSEMBLER_OPEN` even when that arm deliberately excludes
+/// it. Reporting an empty synthetic row for the excluded family obscures what
+/// the arm really evaluated.
+fn validation_kinds(validation: &ValidationSet) -> Vec<LessonKind> {
+    LessonKind::all()
+        .iter()
+        .copied()
+        .filter(|kind| validation.kinds.contains(kind))
+        .collect()
 }
 
 /// One validation pass in both modes.
@@ -373,10 +491,34 @@ fn validate<B: AutodiffBackend>(
     };
 
     let run = |partials: &[Grid], observed: &[Vec<bool>]| {
-        let recon = reconstruct(&inner, partials, observed, &sample_cfg, device);
+        // The corpus is no longer one shape, and `GridBatch` is one tensor: it
+        // asserts against a ragged batch. So reconstruct shape group by shape
+        // group and reassemble in the original order — every report below reads
+        // the same indices it always did.
+        let mut shapes: Vec<(usize, usize)> =
+            partials.iter().map(|g| (g.width, g.height)).collect();
+        shapes.sort_unstable();
+        shapes.dedup();
+        let mut recon: Vec<Option<Grid>> = vec![None; partials.len()];
+        for shape in shapes {
+            let idx: Vec<usize> = (0..partials.len())
+                .filter(|&i| (partials[i].width, partials[i].height) == shape)
+                .collect();
+            let group: Vec<Grid> = idx.iter().map(|&i| partials[i].clone()).collect();
+            let group_obs: Vec<Vec<bool>> = idx.iter().map(|&i| observed[i].clone()).collect();
+            let out = reconstruct(&inner, &group, &group_obs, &sample_cfg, device);
+            for (&i, grid) in idx.iter().zip(out) {
+                recon[i] = Some(grid);
+            }
+        }
+        let recon: Vec<Grid> = recon
+            .into_iter()
+            .map(|g| g.expect("every validation grid belongs to a shape group"))
+            .collect();
+
         let aggregate = reconstruction_report(&validation.originals, &recon, observed);
         let mut by_lesson = BTreeMap::new();
-        for &kind in feasible_kinds(cfg.grid_size).iter() {
+        for kind in validation_kinds(validation) {
             let indexes: Vec<usize> = validation
                 .kinds
                 .iter()
@@ -418,7 +560,7 @@ mod tests {
         type B = CpuAutodiff;
         let device = Default::default();
         let cfg = TrainConfig {
-            grid_size: 11,
+            canvases: vec![Canvas::square(11)],
             steps: 40,
             batch_size: 8,
             warmup: 5,
@@ -448,5 +590,147 @@ mod tests {
             ..cfg.clone()
         };
         assert_ne!(build_validation_set(&other), build_validation_set(&cfg));
+    }
+
+    /// The default curriculum has to teach the whole vocabulary *on the shape the
+    /// issue infers on*, not merely somewhere in the pool. A canvas that only the
+    /// simple families fit is a canvas where the model has never been asked to
+    /// compose anything, and 13×9 is exactly the case the issue reports.
+    #[test]
+    fn the_default_curriculum_teaches_every_family_on_the_inference_canvas() {
+        let cfg = TrainConfig::default();
+        assert!(
+            cfg.canvases.contains(&Canvas::new(13, 9)),
+            "the default pool never draws the shape the issue infers on"
+        );
+        assert_eq!(
+            feasible_kinds(Canvas::new(13, 9)).len(),
+            LessonKind::all().len(),
+            "13x9 is missing lessons the model is expected to know there"
+        );
+        assert_eq!(
+            curriculum_kinds(&cfg.canvases).len(),
+            LessonKind::all().len()
+        );
+    }
+
+    /// Every canvas in the default pool must be able to hold *something*, or
+    /// `draw_sample` indexes an empty `kinds` and the run panics on whichever
+    /// step happens to draw that shape — a failure that would surface at minute
+    /// forty of a GPU run rather than here.
+    #[test]
+    fn every_canvas_in_the_default_pool_can_hold_a_lesson() {
+        for canvas in TrainConfig::default().canvases {
+            assert!(
+                !feasible_kinds(canvas).is_empty(),
+                "no lesson fits {canvas}, which the curriculum still draws"
+            );
+        }
+    }
+
+    /// `fits` is arithmetic; generation is generate-and-verify. Every caller that
+    /// trusts the first to predict the second is a loop — `bin/sample.rs` holds a
+    /// feasible kind fixed until it generates, so a family that passed `fits` and
+    /// never built would hang it rather than fail it. Checked across the whole
+    /// default pool, since that is the set those loops are handed.
+    #[test]
+    fn a_lesson_that_fits_a_canvas_can_actually_be_built_on_it() {
+        for canvas in TrainConfig::default().canvases {
+            for kind in feasible_kinds(canvas) {
+                let built = (0..60u64).any(|seed| generate(kind, canvas, seed).is_some());
+                assert!(
+                    built,
+                    "{} fits {canvas} but never generated there -- every loop that \
+                     trusts `fits` spins forever on this",
+                    kind.name()
+                );
+            }
+        }
+    }
+
+    /// A batch is one tensor and `GridBatch::from_grids` asserts against a ragged
+    /// one, so the per-batch draw is load-bearing rather than an optimization.
+    #[test]
+    fn a_batch_is_drawn_at_one_shape() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut seed_ctr = 0;
+        let canvas = Canvas::new(13, 9);
+        let (grids, _) = train_batch(canvas, 8, &mut rng, &mut seed_ctr, false, true);
+        assert!(grids
+            .iter()
+            .all(|g| (g.width, g.height) == (canvas.width, canvas.height)));
+    }
+
+    /// Scratch validation removes every machine, so the training objective must
+    /// also ask the denoiser to predict machines. Historically the two basic
+    /// assembler lessons put their assembler anchor in `protected`; using that
+    /// list as the observed mask gave the recipe cell exactly zero loss while
+    /// validation expected the model to invent it from source/sink anchors.
+    #[test]
+    fn training_batches_do_not_reveal_assembler_answers() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut seed_ctr = 0;
+        let (grids, observed) = train_batch(
+            Canvas::new(13, 9),
+            128,
+            &mut rng,
+            &mut seed_ctr,
+            false,
+            true,
+        );
+
+        let mut assemblers = 0;
+        for (grid, mask) in grids.iter().zip(&observed) {
+            for (i, cell) in grid.cells.iter().enumerate() {
+                if cell.entity == crate::world::Entity::Assembler {
+                    assemblers += 1;
+                    assert!(
+                        !mask[i],
+                        "training revealed assembler recipe {:?} at cell {i}",
+                        cell.item
+                    );
+                }
+            }
+        }
+        assert!(
+            assemblers > 0,
+            "deterministic batch did not exercise a machine lesson"
+        );
+    }
+
+    #[test]
+    fn legacy_control_reproduces_revealed_assembler_answers() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut seed_ctr = 0;
+        let (grids, observed) =
+            train_batch(Canvas::new(13, 9), 128, &mut rng, &mut seed_ctr, true, true);
+        assert!(grids.iter().zip(&observed).any(|(grid, mask)| grid
+            .cells
+            .iter()
+            .enumerate()
+            .any(|(i, cell)| cell.entity == crate::world::Entity::Assembler && mask[i])));
+    }
+
+    #[test]
+    fn assembler_open_control_removes_only_the_bridge_family() {
+        let canvas = Canvas::new(13, 9);
+        let production = training_kinds(canvas, true);
+        let control = training_kinds(canvas, false);
+
+        assert!(production.contains(&LessonKind::AssemblerOpen));
+        assert!(!control.contains(&LessonKind::AssemblerOpen));
+        assert_eq!(production.len(), control.len() + 1);
+        assert!(control
+            .iter()
+            .all(|kind| production.contains(kind) && *kind != LessonKind::AssemblerOpen));
+
+        let control_cfg = TrainConfig {
+            canvases: vec![canvas],
+            val_batch: LessonKind::all().len() * 2,
+            include_assembler_open: false,
+            ..Default::default()
+        };
+        let validation = build_validation_set(&control_cfg);
+        assert_eq!(validation_kinds(&validation), control);
     }
 }
