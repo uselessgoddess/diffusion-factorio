@@ -50,6 +50,9 @@ each validation step reconstructs those same known-good factories and reports:
 - **`place` — placement recall**: entity accuracy on masked *non-empty* cells.
   The honest signal, immune to the empty-cell majority. If loss drops but `place`
   stays near 0, the model has collapsed to "predict empty".
+- **`asm` and `recipe`**: assembler-anchor recall and recipe accuracy only on
+  assembler targets. These prevent belts and the `Item::None` majority from
+  concealing a model that never learned to place or configure a machine.
 - **`functional`**: fraction of *reconstructed* factories where the **right item**
   reaches a sink, checked by the simulator (`src/sim.rs`). The number that matters.
 - **`exact`**, **`consistent`**, and per-channel accuracy `[E, D, I, M]`.

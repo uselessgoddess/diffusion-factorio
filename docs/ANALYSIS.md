@@ -62,8 +62,9 @@ The reference is a hybrid: a Python model/training stack (`factorion.py`,
 2. **Receptive-field bottleneck.** A purely local conv/window model cannot answer
    grid-global questions ("which way is the far-off sink?"), which caps layout
    quality. This is a real architectural limit the reference bumped into.
-   → Every residual block injects a **global-context vector** (mean-pool → linear
-   → broadcast), so global routing information is available everywhere
+   → Every residual block injects a **global-context vector** (mean+max pool →
+   linear → broadcast), so global routing information and sparse cues are
+   available everywhere
    (`src/model.rs`, `ResBlock`). See `docs/DESIGN.md`.
 
 3. **Autoregressive/RL sequ-of-tokens framing.** The reference leans on

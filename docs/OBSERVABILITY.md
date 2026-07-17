@@ -27,6 +27,11 @@ channel's unweighted NLL to see whether one head is dominating.
 exposes all-empty collapse. Raw entity accuracy alone is not trustworthy because
 most cells are empty.
 
+`assembler_recall` narrows that signal to assembler anchors, and
+`recipe_accuracy` scores the item channel only at those anchors. Read both for a
+factory task: aggregate placement is mostly belts and aggregate item accuracy is
+mostly `Item::None`, so neither can prove the model learned machines.
+
 `functional_rate` asks the internal simulator whether reconstructed layouts
 still connect a source to a sink. `exact_rate` requires every masked category to
 match the procedural solution, while `consistent_rate` only requires legal
@@ -65,6 +70,8 @@ certainty.
   decay.
 - `--t-min`: lower bound on diffusion time, which bounds `1/t` variance when
   `--elbo` is enabled.
+- `--scratch-probability`: fraction trained at exactly `t=1`, the fully masked
+  state from which scratch sampling begins (default 0.25).
 - `--sample-steps`: confidence-based reveal rounds. More rounds provide more
   opportunities to revise uncertain regions but cost more validation time.
 - `--hidden`, `--blocks`: convolutional width and depth; both raise memory and

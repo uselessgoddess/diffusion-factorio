@@ -1,44 +1,94 @@
-# Why the 10,000-step run does not generalize
+# Why the shape-generalized run still does not generalize
 
-Issue #13 trains for 10,000 steps on 11×11, runs `serve` on 13×9, and gets
-factories that deliver nothing on tasks a human solves by eye. This document
-answers why, in the order the issue asks.
+Issue #13 first trained on 11×11 and inferred on 13×9. The first version of this
+analysis found five real inference, scoring, rendering, legality, and canvas
+coverage faults. The user then retrained the shape-mixed curriculum for 5,000
+steps on every 9×9 through 15×15 canvas and supplied the complete HTML report.
+That run still failed the real tasks. It is the decisive evidence: shape was a
+problem, but it was not the root cause of machine generation.
 
 Every claim here is either a quoted line of code or a table some
 `experiments/*.rs` prints. Where a number comes from a checkpoint, the
 checkpoint is named, because one of them is far too small to trust and it
 matters which claims rest on it.
 
-## TL;DR
+## The new report localizes the failure
 
-The final log is not the log of a model that failed to learn:
+The aggregate looks respectable:
 
 ```
-step 10000/10000 | loss 0.1079 | place 0.99 | acc[E=0.98 D=0.98 I=1.00 M=1.00]
-  VAL     n=512 | exact=0.646 functional=0.912 consistent=0.869 | thput=6.034/s
-  SCRATCH n=512 | exact=0.391 functional=0.736 consistent=0.748 | thput=5.694/s
+VAL functional=0.883
+SCRATCH functional=0.730
 ```
 
-It is the log of a model that learned what it was scored on. Five separate
-things sat between that log and a factory that runs, and none of them were
-the model's weights:
+But the final frozen scratch report splits into two completely different
+models hiding inside that average:
 
-1. **The decoder could not emit a legal cell even when the model knew the
-   answer.** Four channels were argmaxed independently. Fixed — `c1f98eb`.
-2. **Best-of-N ranked unbuildable draws above buildable ones.** Fixed — `053b439`.
-3. **The ASCII view drew the violations as clean floor**, so none of this was
-   visible. Fixed — `4b23104`.
-4. **A machine with no recipe was a legal cell**, so a dead factory scored
-   `consistent=1.0`. Fixed — `03e3341`.
-5. **The curriculum was square-only** and the issue infers on 13×9 — so two of
-   the eight lesson families, the only two that compose several machines into one
-   factory, could never be shown there. Fixed by generating each lesson natively
-   at `width` × `height` rather than padding a square; the decision, and what it
-   was weighed against, is [below](#what-was-done-about-it-native-width-height-not-padding).
+| lesson | functional |
+|---|---:|
+| `ASSEMBLER_LINE` | **0 / 64** |
+| `ASSEMBLER_CHAOS` | **0 / 64** |
+| `MOVE_ONE_ITEM` | 60 / 64 |
+| `MOVE_ONE_ITEM_CHAOS` | 58 / 64 |
+| `UNDERGROUND_CROSS` | 64 / 64 |
+| `ASSEMBLER_BANK` | 64 / 64 |
+| `CIRCUIT_LINE` | 64 / 64 |
+| `SHARED_LINE` | 64 / 64 |
 
-Faults 1 and 4 are both visible in the issue's own two examples, and fault 5 is
-the reason the issue's framing — «независимо от места на grid» — is the right
-framing.
+This is not a vague capacity shortfall. Routing generalizes; the two basic
+machine families receive no usable machine supervision.
+
+## The actual train/inference mismatch
+
+`train_batch` built its observed mask from `Sample::protected`. Both
+`gen_assembler_line` and `gen_assembler_chaos` put the assembler anchor—and
+therefore its recipe tag—in that list. Observed cells are excluded from the
+diffusion loss. The model consequently received **zero loss on assembler
+placement and recipe selection in those lessons**.
+
+Scratch validation does the opposite: `blank_to_scaffold` retains only sources
+and sinks and removes the assembler. Training supplied the answer that inference
+asked the model to invent. The 0/64 + 0/64 result is exactly what that contract
+predicts.
+
+The fix changes production training to the same source/sink-only conditioning
+used by scratch evaluation. A regression test first reproduced the old behavior
+(`CopperCable` assembler observed in a deterministic training batch); the same
+test now requires every assembler answer to be unobserved. The historical mask
+remains available only behind `--legacy-protected-scaffold` for the controlled
+CI comparison.
+
+Three adjacent mismatches are fixed at the same boundary:
+
+1. Sampling begins from every answer cell masked at exactly `t=1`, but a
+   continuous training draw has zero probability of selecting exactly one.
+   `scratch_probability=0.25` now trains on that exact initial state.
+2. The requested `IronPlate + CopperCable → GreenCircuit` task is not the old
+   `CIRCUIT_LINE`: that lesson starts from copper plate and correctly uses two
+   assemblers. `DIRECT_RECIPE` now samples every craftable output and teaches
+   the supplied-cable circuit with exactly one assembler.
+3. Aggregate item accuracy is mostly `Item::None`, and placement recall is
+   dominated by belts. Reports now expose assembler-anchor recall and recipe
+   accuracy restricted to assembler targets.
+
+## Architecture: what to borrow, and what not to
+
+The uploaded Quark model is a compact causal language Transformer (RoPE,
+SwiGLU, RMSNorm, grouped-query attention, recurrently shared layers). Its causal
+ordering is a poor direct fit for a grid where every unknown cell should use
+context from all directions. More importantly, no architecture can learn a
+label excluded from its loss, so replacing the denoiser before repairing the
+objective would not address the measured cause.
+
+One architecture change is justified by an existing Factorion ablation:
+concatenated spatial mean and max pooling materially improved held-out assembler
+recipe accuracy and throughput there. The residual blocks now broadcast both.
+Mean captures prevalence; max preserves a sparse source, sink, obstacle, or
+recipe cue that is diluted on a larger canvas.
+
+The five earlier faults below remain real and their fixes remain necessary.
+They were not sufficient, and the previous wording claiming they fully
+explained the failed factories was wrong.
 
 ## The first example, answered
 

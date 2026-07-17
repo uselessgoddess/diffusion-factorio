@@ -381,7 +381,7 @@ the server takes a hand-painted task rather than a lesson id.
 What is *not* proven, and what I would measure before building any mod:
 
 1. **Size generalization has never been tested.** The denoiser is fully
-   convolutional and mean-pools for global context, so **variable sizes are
+   convolutional and mean+max-pools for global context, so **variable sizes are
    already free and nobody has measured them**. `--size` exists on all three
    binaries. **Train at 11, sample at 15 — that experiment costs one command and
    has never been run.** Do it before designing a UI around arbitrary areas.
@@ -391,8 +391,8 @@ What is *not* proven, and what I would measure before building any mod:
    `docs/GENERALIZATION.md`. `--size` on `train` is now the square-only control.)*
 2. **The receptive field is a hard limit and it is computable.** ±1 at the stem,
    ±2 per block; at `--blocks 6` a cell sees ±13 — a 27×27 window. Beyond that,
-   routing depends entirely on the mean-pooled global vector, and **mean-pooling
-   a 30×30 board into one vector is a very coarse summary to route a bus with.**
+   routing depends entirely on the pooled global vector. Mean+max retains sparse
+   cues better, but **summarizing a 30×30 board in one vector is still coarse.**
    Expect size generalization to break here first. If a player selects a 40×40
    area, this is what will bite, and the fix is architectural (multi-scale U-Net,
    or axial attention), not more steps.

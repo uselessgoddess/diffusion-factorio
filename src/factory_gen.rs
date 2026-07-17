@@ -5,7 +5,9 @@
 //! (`factorion_rs/src/factory_gen.rs`): each lesson is a distinct layout
 //! pattern built by construction and verified functional (`sim::item_reaches_sink`),
 //! then a subset of *removable* entities is blanked out. Source/sink/recipe
-//! anchors are `protected` and never blanked, so the scaffold is always visible.
+//! anchors may be `protected` for partial-inpainting examples. Production
+//! training conditions only on source/sink task anchors; answer cells are never
+//! revealed through this bookkeeping.
 //!
 //! For discrete diffusion the blanked cells become MASK tokens and the model
 //! must inpaint them — the observed cells are the conditioning context.
@@ -577,7 +579,8 @@ fn gen_assembler_line(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
     if !item_reaches_sink(&grid) {
         return None;
     }
-    // Assembler (recipe) is protected; the two inserters are removable.
+    // Partial inpainting preserves the assembler; task-conditioned training
+    // intentionally ignores this list and masks it with the rest of the answer.
     let protected = vec![grid.idx(x0, y), grid.idx(x0 + 2, y0), grid.idx(x0 + 6, y)];
     let removable = vec![grid.idx(x0 + 1, y), grid.idx(x0 + 5, y)];
     Some(Sample {
@@ -927,8 +930,8 @@ fn gen_assembler_chaos(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
     if !item_reaches_sink(&grid) {
         return None;
     }
-    // The task is "plates arrive here, gears are wanted there, and the machine
-    // is here" -- the belts and the inserters are the answer.
+    // Partial inpainting preserves the machine location. Task-conditioned
+    // training uses only the source and sink and must predict it too.
     let protected = vec![
         grid.idx(source.0, source.1),
         grid.idx(sink.0, sink.1),

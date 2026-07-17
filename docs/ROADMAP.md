@@ -20,7 +20,7 @@ a run is going, and how to pose the model a task nobody generated:
   undergrounds, inserters, assemblers; a fixpoint over the item **sets** that
   reach each cell, so a machine runs only once *every* ingredient arrives.
   ✅ unit-tested.
-- **Lesson generator** (`src/factory_gen.rs`) — 8 lesson kinds, built by
+- **Lesson generator** (`src/factory_gen.rs`) — 9 lesson kinds, built by
   construction and verified functional; blanking into (partial, solution) pairs.
   Three of them (`ASSEMBLER_BANK`, `CIRCUIT_LINE`, `SHARED_LINE`) admit **many**
   valid answers per task. `SHARED_LINE` is the only one that teaches one input
@@ -32,7 +32,8 @@ a run is going, and how to pose the model a task nobody generated:
 - **Best-of-N** (`src/best_of_n.rs`) — draw N candidates, keep the one the
   simulator scores highest. No retraining. ✅ unit-tested.
 - **Masked diffusion core** (`src/diffusion.rs`) — forward masking + joint,
-  structure-weighted CE loss, MDLM ELBO option. ✅ unit-tested.
+  structure-weighted CE loss, exact fully-masked scratch examples, MDLM ELBO
+  option. ✅ unit-tested.
 - **Denoiser** (`src/model.rs`) — per-channel embeddings, conv tower with
   global-context + time injection, per-channel heads. ✅ shape-tested.
 - **Training loop** (`src/train.rs`) — AdamW, warmup+cosine LR, grad clipping,
@@ -272,13 +273,13 @@ plate straight into a gear sink" as functional — i.e. rewarding *skipping* the
 assembler. It now carries the item through the BFS and applies recipes.
 
 ### 3. Receptive field / global routing
-Addressed architecturally via the global-context vector, but for large grids a
-single mean-pool may be too coarse.
+Addressed architecturally via a concatenated mean+max global-context vector.
+For grids beyond the convolutional receptive field even that may be too coarse.
 **Next:** multi-scale U-Net (down/up sampling) or axial/attention blocks; measure
 whether functional-rate scales with grid size.
 
 ### 4. Curriculum breadth & realism
-Six hand-built lessons exercise every channel but are small and templated. Real
+Nine hand-built lessons exercise every channel but remain small. Real
 Factorio layouts are richer still (buses, furnaces, deeper recipe trees).
 
 Machines are now the size they are in Factorio — an assembler covers 3×3, a
