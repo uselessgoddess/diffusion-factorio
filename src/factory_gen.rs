@@ -30,10 +30,10 @@ pub enum LessonKind {
     MoveOneItemChaos,
     /// Source → inserter → assembler(recipe) → inserter → sink. Adds item.
     AssemblerLine,
-    /// The same craft, but nothing is stamped: obstacles are scattered, the
-    /// machine, source and sink land anywhere, and the belts are *routed*
-    /// between them. The only machine lesson whose task space does not run out —
-    /// see [`gen_assembler_chaos`].
+    /// The same craft, but nothing is stamped: obstacles, source, and sink form
+    /// a random visible task; a deterministic solver then chooses the machine
+    /// pose and *routes* the belts. The only machine lesson whose task space
+    /// does not run out — see [`gen_assembler_chaos`].
     AssemblerChaos,
     /// Ingredient sources feed one assembler directly. Covers every recipe,
     /// including iron plate + copper cable → green circuit without an
@@ -771,8 +771,9 @@ const CHAOS_OBSTACLES: usize = 10;
 /// of a world the model can see. This applies that to the craft:
 ///
 /// * obstacles are scattered first, and the router has to respect them;
-/// * the machine, the source and the sink land anywhere they fit;
-/// * both inserters attach to whichever faces of the machine were free;
+/// * source and sink land anywhere they fit;
+/// * the closest feasible machine footprint and its inserter faces are derived
+///   deterministically from that visible task;
 /// * the belts are whatever BFS finds, so the answer depends on the obstacles
 ///   rather than ignoring them.
 ///
