@@ -1945,21 +1945,26 @@ mod tests {
     /// the cells the model must fill, with translation collapsed, because the
     /// denoiser is `same`-padded convolution and slides for free.
     ///
-    /// [`LessonKind::AssemblerLine`] scores **one**. Not one per recipe: the
-    /// recipe lives on the assembler, which is protected scaffold, so every
-    /// task's answer is the same constant picture of belts and inserters. A
-    /// 5,000-step run draws it ~23,000 times. That is the bottleneck, and it is
-    /// exactly as bad on a bigger board — a wider grid buys offsets, which cost
-    /// compute and teach nothing (`docs/ROADMAP.md` bottleneck 0).
+    /// [`LessonKind::AssemblerLine`] scores **two**, one per recipe: production
+    /// training now masks the assembler as well as the belts and inserters. A
+    /// 5,000-step run still draws each template thousands of times. That is the
+    /// bottleneck, and it is exactly as bad on a bigger board — a wider grid
+    /// buys offsets, which cost compute and teach nothing (`docs/ROADMAP.md`
+    /// bottleneck 0).
     #[test]
-    fn the_chaos_family_teaches_answers_and_the_templated_one_teaches_a_constant() {
+    fn the_chaos_family_teaches_varied_answers_and_the_templated_one_teaches_two() {
         /// The answer alone, normalized to its own bounding box.
         fn answer_shape(s: &Sample) -> String {
             let g = &s.solution;
             let cells: Vec<(usize, usize, Cell)> = s
-                .removable
+                .solution
+                .cells
                 .iter()
-                .map(|&i| (i % g.width, i / g.width, g.cells[i]))
+                .enumerate()
+                .filter(|(_, c)| {
+                    !c.is_empty() && !matches!(c.entity, Entity::Source | Entity::Sink)
+                })
+                .map(|(i, &c)| (i % g.width, i / g.width, c))
                 .collect();
             let min_x = cells.iter().map(|&(x, _, _)| x).min().unwrap();
             let min_y = cells.iter().map(|&(_, y, _)| y).min().unwrap();
@@ -1991,8 +1996,8 @@ mod tests {
 
         assert_eq!(
             shapes(LessonKind::AssemblerLine),
-            1,
-            "the templated line is supposed to teach exactly one answer -- if this \
+            2,
+            "the templated line is supposed to teach exactly two recipe answers -- if this \
              moved, the premise of ASSEMBLER_CHAOS changed and the docs are stale"
         );
         let chaos = shapes(LessonKind::AssemblerChaos);

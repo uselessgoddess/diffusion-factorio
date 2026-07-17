@@ -19,8 +19,6 @@ use diffusion_factorio::factory_gen::{generate, Canvas, LessonKind};
 use diffusion_factorio::sim::item_reaches_sink;
 use diffusion_factorio::textual::render;
 use diffusion_factorio::world::{Cell, Entity, Grid, Item};
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha8Rng;
 
 const DEFAULT_SIZE: usize = 11;
 const SEEDS: u64 = 200_000;
@@ -214,10 +212,10 @@ fn main() {
             factories.insert(factory_key(&sample.solution));
             shapes.insert(translation_invariant_key(&sample.solution));
 
-            // Reproduce exactly what train.rs validation does: blank every
-            // removable cell, keep the protected scaffold observed.
-            let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let (_partial, observed) = sample.blank(None, &mut rng);
+            // Reproduce production training and scratch validation exactly:
+            // only source/sink task anchors stay observed. `protected` may hold
+            // answer cells for legacy inpainting and must not shrink this count.
+            let (_partial, observed) = sample.blank_to_scaffold();
             answer_shapes.insert(answer_shape_key(&sample.solution, &observed));
             answers_per_context
                 .entry(conditioning_key(&sample.solution, &observed))
