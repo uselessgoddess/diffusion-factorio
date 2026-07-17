@@ -78,6 +78,9 @@ struct Args {
     /// Reproduce the old answer-leaking scaffold for an A/B control only.
     #[arg(long, default_value_t = false)]
     legacy_protected_scaffold: bool,
+    /// Omit the obstacle-free arbitrary-assembler bridge for a controlled A/B.
+    #[arg(long, default_value_t = false)]
+    no_assembler_open: bool,
     /// Checkpoint path prefix (writes `<out>.mpk` + `<out>.json`).
     #[arg(long, default_value = "checkpoints/denoiser")]
     out: PathBuf,
@@ -127,6 +130,7 @@ fn main() -> anyhow::Result<()> {
         sample_steps: args.sample_steps,
         seed: args.seed,
         legacy_protected_scaffold: args.legacy_protected_scaffold,
+        include_assembler_open: !args.no_assembler_open,
         model: model_cfg.clone(),
         diffusion: DiffusionConfig::new()
             .with_elbo_weight(args.elbo)
@@ -175,6 +179,7 @@ fn main() -> anyhow::Result<()> {
         sample_steps: cfg.sample_steps,
         seed: cfg.seed,
         legacy_protected_scaffold: cfg.legacy_protected_scaffold,
+        include_assembler_open: cfg.include_assembler_open,
         peak_lr: cfg.lr,
         warmup_steps: cfg.warmup,
         grad_clip: cfg.grad_clip,

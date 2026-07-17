@@ -68,6 +68,9 @@ pub struct TrainConfig {
     /// Reproduce the historical target-leaking conditioning for controlled
     /// experiments. Production training must leave this false.
     pub legacy_protected_scaffold: bool,
+    /// Include the obstacle-free arbitrary-assembler curriculum rung.
+    /// Production leaves this true; false is the exact hosted A/B control.
+    pub include_assembler_open: bool,
     pub model: DenoiserConfig,
     pub diffusion: DiffusionConfig,
 }
@@ -86,6 +89,7 @@ impl Default for TrainConfig {
             sample_steps: 12,
             seed: 0,
             legacy_protected_scaffold: false,
+            include_assembler_open: true,
             model: DenoiserConfig::new(),
             diffusion: DiffusionConfig::new(),
         }
@@ -178,6 +182,7 @@ where
             &mut data_rng,
             &mut seed_ctr,
             cfg.legacy_protected_scaffold,
+            cfg.include_assembler_open,
         );
         let batch = GridBatch::<B>::from_grids(&grids, Some(&observed), device);
 
@@ -317,9 +322,22 @@ pub fn curriculum_kinds(canvases: &[Canvas]) -> Vec<LessonKind> {
         .collect()
 }
 
-/// Draw a single functional lesson, retrying kinds/seeds until one validates.
-fn draw_sample(canvas: Canvas, rng: &mut ChaCha8Rng, seed_ctr: &mut u64) -> Sample {
-    let kinds = feasible_kinds(canvas);
+/// The production family set, with one narrow switch for the hosted bridge A/B.
+fn training_kinds(canvas: Canvas, include_assembler_open: bool) -> Vec<LessonKind> {
+    feasible_kinds(canvas)
+        .into_iter()
+        .filter(|kind| include_assembler_open || *kind != LessonKind::AssemblerOpen)
+        .collect()
+}
+
+fn draw_sample_from(
+    canvas: Canvas,
+    rng: &mut ChaCha8Rng,
+    seed_ctr: &mut u64,
+    include_assembler_open: bool,
+) -> Sample {
+    // Draw a single functional lesson, retrying kinds/seeds until one validates.
+    let kinds = training_kinds(canvas, include_assembler_open);
     loop {
         let kind = kinds[rng.gen_range(0..kinds.len())];
         let seed = *seed_ctr;
@@ -342,11 +360,12 @@ fn train_batch(
     rng: &mut ChaCha8Rng,
     seed_ctr: &mut u64,
     legacy_protected_scaffold: bool,
+    include_assembler_open: bool,
 ) -> (Vec<Grid>, Vec<Vec<bool>>) {
     let mut grids = Vec::with_capacity(batch);
     let mut observed = Vec::with_capacity(batch);
     for _ in 0..batch {
-        let s = draw_sample(canvas, rng, seed_ctr);
+        let s = draw_sample_from(canvas, rng, seed_ctr, include_assembler_open);
         let obs = if legacy_protected_scaffold {
             (0..s.solution.len())
                 .map(|i| s.protected.contains(&i))
@@ -380,7 +399,10 @@ struct ValidationSet {
 /// exact same tasks.
 fn build_validation_set(cfg: &TrainConfig) -> ValidationSet {
     let mut rng = ChaCha8Rng::seed_from_u64(cfg.seed ^ 0x05EE_DF12_EDA7_A5E7);
-    let kinds = curriculum_kinds(&cfg.canvases);
+    let kinds: Vec<LessonKind> = curriculum_kinds(&cfg.canvases)
+        .into_iter()
+        .filter(|kind| cfg.include_assembler_open || *kind != LessonKind::AssemblerOpen)
+        .collect();
     let mut seed_ctr = cfg.seed ^ 0x0DD0_0DD0_0DD0_0DD0;
     let mut originals = Vec::with_capacity(cfg.val_batch);
     let mut partials = Vec::with_capacity(cfg.val_batch);
@@ -619,7 +641,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let mut seed_ctr = 0;
         let canvas = Canvas::new(13, 9);
-        let (grids, _) = train_batch(canvas, 8, &mut rng, &mut seed_ctr, false);
+        let (grids, _) = train_batch(canvas, 8, &mut rng, &mut seed_ctr, false, true);
         assert!(grids
             .iter()
             .all(|g| (g.width, g.height) == (canvas.width, canvas.height)));
@@ -634,8 +656,14 @@ mod tests {
     fn training_batches_do_not_reveal_assembler_answers() {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let mut seed_ctr = 0;
-        let (grids, observed) =
-            train_batch(Canvas::new(13, 9), 128, &mut rng, &mut seed_ctr, false);
+        let (grids, observed) = train_batch(
+            Canvas::new(13, 9),
+            128,
+            &mut rng,
+            &mut seed_ctr,
+            false,
+            true,
+        );
 
         let mut assemblers = 0;
         for (grid, mask) in grids.iter().zip(&observed) {
@@ -660,11 +688,26 @@ mod tests {
     fn legacy_control_reproduces_revealed_assembler_answers() {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         let mut seed_ctr = 0;
-        let (grids, observed) = train_batch(Canvas::new(13, 9), 128, &mut rng, &mut seed_ctr, true);
+        let (grids, observed) =
+            train_batch(Canvas::new(13, 9), 128, &mut rng, &mut seed_ctr, true, true);
         assert!(grids.iter().zip(&observed).any(|(grid, mask)| grid
             .cells
             .iter()
             .enumerate()
             .any(|(i, cell)| cell.entity == crate::world::Entity::Assembler && mask[i])));
+    }
+
+    #[test]
+    fn assembler_open_control_removes_only_the_bridge_family() {
+        let canvas = Canvas::new(13, 9);
+        let production = training_kinds(canvas, true);
+        let control = training_kinds(canvas, false);
+
+        assert!(production.contains(&LessonKind::AssemblerOpen));
+        assert!(!control.contains(&LessonKind::AssemblerOpen));
+        assert_eq!(production.len(), control.len() + 1);
+        assert!(control
+            .iter()
+            .all(|kind| production.contains(kind) && *kind != LessonKind::AssemblerOpen));
     }
 }

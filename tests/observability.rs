@@ -167,6 +167,7 @@ fn html_report_embeds_parameters_and_metric_charts() {
         sample_steps: 12,
         seed: 7,
         legacy_protected_scaffold: false,
+        include_assembler_open: true,
         peak_lr: 3e-4,
         warmup_steps: 100,
         grad_clip: 1.0,

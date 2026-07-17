@@ -58,50 +58,57 @@ jobs:
             --ckpt /tmp/ci-ckpt/denoiser --show 2 --eval 128 \
             | tee sample.log
 
-  # Full task-conditioned objective check. This uses the same seed and model as
-  # the archived random-target control run, so per-lesson scratch metrics show
-  # whether making ASSEMBLER_CHAOS a function of its visible task actually
-  # teaches the missing machine behavior.
+  # Same-SHA A/B for the obstacle-free assembler curriculum bridge. Both arms
+  # keep ASSEMBLER_CHAOS unchanged and score the same dedicated 128-task corpus.
   objective:
+    name: objective (${{ matrix.arm }})
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # The measured 3,000-step control took 115 minutes. Keep enough room for
     # lesson-specific decoding and artifact upload without obscuring hangs.
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: control
+            train_arg: --no-assembler-open
+          - arm: bridge
+            train_arg: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: train (deterministic task target)
+      - name: train (${{ matrix.arm }})
         run: |
           mkdir -p runs
-          cargo run --release --bin train -- \
+          cargo run --release --bin train -- ${{ matrix.train_arg }} \
             --steps 3000 --batch 16 --hidden 32 --blocks 4 \
             --val-every 500 --val-batch 128 \
-            --out runs/deterministic-denoiser \
-            --metrics-out runs/deterministic-metrics.jsonl \
-            --report-out runs/deterministic-report.html \
-            | tee runs/deterministic-train.log
+            --out runs/${{ matrix.arm }}-denoiser \
+            --metrics-out runs/${{ matrix.arm }}-metrics.jsonl \
+            --report-out runs/${{ matrix.arm }}-report.html \
+            | tee runs/${{ matrix.arm }}-train.log
       - name: inspect hard assembler lesson from scratch
         run: |
           cargo run --release --bin sample -- \
-            --ckpt runs/deterministic-denoiser \
+            --ckpt runs/${{ matrix.arm }}-denoiser \
             --lesson ASSEMBLER_CHAOS --scratch \
             --size 13 --height 9 --show 16 --eval 128 --steps 12 \
-            --report runs/assembler-chaos-scratch.html \
-            | tee runs/assembler-chaos-scratch.log
+            --report runs/${{ matrix.arm }}-assembler-chaos-scratch.html \
+            | tee runs/${{ matrix.arm }}-assembler-chaos-scratch.log
       - name: summarize scratch performance by lesson
         run: |
           node -e '
             const fs=require("fs");
             const rows=fs.readFileSync(process.argv[1],"utf8").trim().split("\n").map(JSON.parse);
             const last=[...rows].reverse().find(r=>r.val_scratch);
-            console.log("## objective: deterministic task target");
+            console.log("## objective: ${{ matrix.arm }}");
             console.log(`aggregate functional: ${last.val_scratch.functional_rate.toFixed(3)}`);
             for (const [name,value] of Object.entries(last.val_scratch_by_lesson))
               console.log(`${name}: functional=${value.functional_rate.toFixed(3)} throughput=${value.throughput.toFixed(3)} assembler=${value.assembler_recall.toFixed(3)} recipe=${value.recipe_accuracy.toFixed(3)} inserter=${value.inserter_recall.toFixed(3)}/${value.inserter_direction_accuracy.toFixed(3)} belt=${value.belt_recall.toFixed(3)}/${value.belt_direction_accuracy.toFixed(3)}`);
-          ' runs/deterministic-metrics.jsonl | tee -a "$GITHUB_STEP_SUMMARY"
+          ' runs/${{ matrix.arm }}-metrics.jsonl | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: objective-deterministic
+          name: objective-${{ matrix.arm }}
           path: runs/
