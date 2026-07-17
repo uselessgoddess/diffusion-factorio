@@ -171,7 +171,8 @@ pub const DEFAULT_CANVAS_MAX: usize = 15;
 ///
 /// * **It cannot show the lessons that matter.** A square lesson of side `s`
 ///   padded into `w`×`h` needs `s <= min(w, h)`, so 13×9 admits only lessons
-///   with a min side of 9 — which excludes [`LessonKind::CircuitLine`] and
+///   whose required width and height are both at most 9 — which excludes
+///   [`LessonKind::CircuitLine`] and
 ///   [`LessonKind::SharedLine`] outright, the only chain and the only splitter
 ///   in the curriculum. Generated natively they need 11×5 and 11×7 and fit 13×9
 ///   with room over. Padding drops exactly the compositional families the

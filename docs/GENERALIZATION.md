@@ -387,12 +387,12 @@ checkpoint:
 
 ```
       canvas  padded  native  lost to padding
-        11x11   8/8     8/8    -                          trained shape
-         13x9   6/8     8/8    CIRCUIT_LINE, SHARED_LINE  the issue's shape
-         9x13   6/8     6/8    -                          the same, turned
-          9x9   6/8     6/8    -                          pool floor
-        15x15   8/8     8/8    -                          pool ceiling
-         15x9   6/8     8/8    CIRCUIT_LINE, SHARED_LINE  widest gap
+        11x11   9/9     9/9    -                          trained shape
+         13x9   7/9     9/9    CIRCUIT_LINE, SHARED_LINE  the issue's shape
+         9x13   7/9     7/9    -                          the same, turned
+          9x9   7/9     7/9    -                          pool floor
+        15x15   9/9     9/9    -                          pool ceiling
+         15x9   7/9     9/9    CIRCUIT_LINE, SHARED_LINE  widest gap
 ```
 
 **Native generation, for three reasons, one of them decisive.**
@@ -409,7 +409,7 @@ checkpoint:
    what the model learns from it is "the answer lives inside a square sub-region"
    — the opposite of the requested `независимо от места на grid`. On 13×9 that is
    31% of the canvas; on 15×9, 40%.
-3. **Native costs almost nothing to run.** ~45–50k samples/s per canvas
+3. **Native costs almost nothing to run.** ~8–39k samples/s per canvas
    (§3 of the same experiment), on the CPU, while the backward pass is the run's
    clock. The write cost was real — every generator plus `random_cell`/`step`/
    `neighbours` — but it is paid once, and any future canvas shape is now a config
@@ -435,7 +435,7 @@ Pinned by `factory_gen::tests::padding_squares_would_drop_the_two_lessons_that_c
 and `train::tests::the_default_curriculum_teaches_every_family_on_the_inference_canvas`.
 
 **What this does not settle.** The coverage argument proves a square curriculum
-*cannot show* two of eight families on 13×9. Whether the shape-mixed pool makes
+*cannot show* two of nine families on 13×9. Whether the shape-mixed pool makes
 the model *build better factories* there is a question about weights, and only a
 run answers it. The `curriculum` job in `.github/workflows/ci.yml`
 (`workflow_dispatch`) trains both arms identically apart from the curriculum and
@@ -443,7 +443,7 @@ scores each with `experiments/grid_shape.rs`; read the 13×9 row.
 
 **The known limit, deliberately not fixed here.** Every family is templated in one
 orientation, so an 11-wide lesson does not fit a 9-wide canvas however tall it is —
-which is why native scores 6/8 on 9×13 as well, and the honest reading of that row
+which is why native scores 7/9 on 9×13 as well, and the honest reading of that row
 is that native does not help there. Rotating the templates would buy it back and is
 the obvious next lesson-side move. It is not what 13×9 needs, and padding does not
 buy it either.

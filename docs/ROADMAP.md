@@ -193,7 +193,7 @@ model nothing it does not already have.
 from 200,000 seeds, at every size. It does not stamp anything. It scatters
 obstacles into the conditioning plane and derives its belts by BFS *through*
 them, so the label is a function of a randomized world. **The bottleneck is not
-the size of the canvas — it is that four of six lessons paint the same picture on
+the size of the canvas — it is that several lessons paint the same picture on
 it. Give them the chaos treatment; see step 4.**
 
 **Step 4 has since done exactly that for the assembler lesson.** Under the
@@ -370,7 +370,7 @@ and neither was visible in the ASCII render:
 Both were found with `experiments/why_zero.rs`, which hunts factories that are
 functional but score zero and dumps the cells rather than the glyphs — the render
 draws an inserter as `i` whichever way the hand swings, which is precisely the bug.
-All eight families now report 0 of 200, `SHARED_LINE` included. **`UNDERGROUND_CROSS`, `ASSEMBLER_BANK`
+All nine families now report 0 of 200, `DIRECT_RECIPE` and `SHARED_LINE` included. **`UNDERGROUND_CROSS`, `ASSEMBLER_BANK`
 and `CIRCUIT_LINE` are still templates** and want the same treatment; the bank is
 the interesting one, since it is the only family that is honestly ambiguous and
 that property has to survive the randomization.

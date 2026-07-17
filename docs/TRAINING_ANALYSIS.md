@@ -80,9 +80,9 @@ stood during this run**:
 | `assembler_line` | 231 | ~173× | 0 |
 | `underground_cross` | 110 | ~364× | 0 |
 
-(Today the same command prints **90** for `assembler_line`, and the per-task
-exposures shift — ~0.6× / ~296× / ~242× — because six families now share the step
-budget, the assembler is 3×3, and vanilla recipes leave a single-source line only
+(Today the same command prints **90** for `assembler_line`; the exact exposure
+counts shift as the expanded curriculum shares the step budget, while the
+assembler is 3×3 and vanilla recipes leave a single-source line only
 two of the three recipes to roll. None of it rescues the argument below: 90
 templates seen ~296× each is *more* memorizable than 231 seen ~173×.
 

@@ -147,7 +147,7 @@ fn main() {
          padding drops them, which is to say padding drops exactly the lessons the\n\
          'invent new solutions' goal rests on.\n\n\
          The 9x13 row is where native generation is honest about its own limit: it\n\
-         scores 6/8 too. Every family is templated in one orientation, so a lesson\n\
+         scores 7/9 too. Every family is templated in one orientation, so a lesson\n\
          11 cells wide does not fit a 9-wide canvas however tall it is. Rotating the\n\
          templates would buy that row back and is the obvious next lesson-side move;\n\
          it is not what the issue's 13x9 needs, and it is not what padding buys.\n\n\

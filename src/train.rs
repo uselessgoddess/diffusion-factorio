@@ -292,7 +292,7 @@ fn lr_at(step: usize, cfg: &TrainConfig) -> f64 {
 /// Kinds that can be generated on a given canvas.
 ///
 /// Asked per axis, not against the longer side. That is the difference between
-/// a 13×9 canvas offering the whole curriculum and offering six of eight
+/// a 13×9 canvas offering the whole curriculum and offering only seven of nine
 /// families: a circuit line is 11×5 and a shared line 11×7, and both fit 13×9
 /// with room to spare — under one square number they were billed as needing 11
 /// rows apiece and ruled out.

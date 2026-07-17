@@ -583,8 +583,8 @@ Full detail and rationale in [`docs/ROADMAP.md`](ROADMAP.md).
    scaled-down one.
 2. **Widen the ambiguous curriculum** — the open half of the work here, and the
    single highest-value item on the list (§1.3 says the curriculum is what is
-   capping the model). Four of six families are still rigid, and the two that are
-   not are small: the bank is 30 memorizable tasks (189 before the assemblers were
+   capping the model). Several families are still rigid, and two early composite
+   lessons are small: the bank is 30 memorizable tasks (189 before the assemblers were
    3×3 and the recipes were vanilla), and `CIRCUIT_LINE` is **7**.
 
    This item used to say "**raise the grid size first**". It was wrong, and
