@@ -58,13 +58,14 @@ jobs:
             --ckpt /tmp/ci-ckpt/denoiser --show 2 --eval 128 \
             | tee sample.log
 
-  # Does matching the training objective to scratch inference fix the two
-  # assembler families that scored 0/64 in the uploaded 5,000-step run?
+  # Once assembler answers participate in the loss, does giving their single
+  # recipe-bearing anchor enough weight fix the remaining sparse-machine
+  # failure measured by the first objective A/B?
   #
-  # Both arms use the same mixed-shape curriculum, direct-recipe family and
-  # architecture. The control alone restores the old protected scaffold and
-  # removes exact t=1 examples. Unit tests prove the mask mechanics; this slower
-  # run tests what weights learn from them.
+  # Both arms use task-only conditioning, exact t=1 examples, the same seed,
+  # mixed-shape curriculum, direct-recipe family and architecture. Only the
+  # dedicated assembler multiplier changes. Unit tests prove the weight
+  # mechanics; this slower run tests what weights learn from them.
   #
   objective:
     if: github.event_name == 'workflow_dispatch'
@@ -74,9 +75,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arm: legacy
-            flags: --legacy-protected-scaffold --scratch-probability 0
-          - arm: task
+          - arm: task-unweighted
+            flags: --assembler-weight 1
+          - arm: task-weighted
             flags: ""
     steps:
       - uses: actions/checkout@v4

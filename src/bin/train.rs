@@ -70,6 +70,9 @@ struct Args {
     /// Extra loss weight for non-empty cells (prevents empty collapse).
     #[arg(long, default_value_t = 8.0)]
     structure_weight: f64,
+    /// Extra loss weight for assembler anchors after the structure weight.
+    #[arg(long, default_value_t = 8.0)]
+    assembler_weight: f64,
     #[arg(long, default_value_t = 0)]
     seed: u64,
     /// Reproduce the old answer-leaking scaffold for an A/B control only.
@@ -129,7 +132,8 @@ fn main() -> anyhow::Result<()> {
             .with_elbo_weight(args.elbo)
             .with_t_min(args.t_min)
             .with_scratch_probability(args.scratch_probability)
-            .with_structure_weight(args.structure_weight),
+            .with_structure_weight(args.structure_weight)
+            .with_assembler_weight(args.assembler_weight),
     };
 
     println!(
@@ -182,6 +186,7 @@ fn main() -> anyhow::Result<()> {
         t_min: cfg.diffusion.t_min,
         scratch_probability: cfg.diffusion.scratch_probability,
         structure_weight: cfg.diffusion.structure_weight,
+        assembler_weight: cfg.diffusion.assembler_weight,
     };
     write_training_report(&args.report_out, &metadata, &logs)?;
 

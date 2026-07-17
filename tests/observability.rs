@@ -173,12 +173,14 @@ fn html_report_embeds_parameters_and_metric_charts() {
         t_min: 0.02,
         scratch_probability: 0.25,
         structure_weight: 8.0,
+        assembler_weight: 8.0,
     };
     write_training_report(&path, &metadata, &example_logs()).unwrap();
     let html = fs::read_to_string(&path).unwrap();
 
     assert!(html.contains("Training report"));
     assert!(html.contains("structure_weight"));
+    assert!(html.contains("assembler_weight"));
     assert!(html.contains("scratch_probability"));
     assert!(html.contains("Functional / exact / consistent"));
     assert!(html.contains("Built from scratch"));

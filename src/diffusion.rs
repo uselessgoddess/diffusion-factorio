@@ -48,6 +48,12 @@ pub struct DiffusionConfig {
     /// bottleneck — see `docs/ROADMAP.md`. `1.0` disables the reweighting.
     #[config(default = 8.0)]
     pub structure_weight: f64,
+    /// Additional loss multiplier for an assembler anchor, after the general
+    /// non-empty-cell weight. One machine/recipe cell otherwise competes with
+    /// every belt and inserter in the layout despite carrying the task's
+    /// critical crafting decision.
+    #[config(default = 8.0)]
+    pub assembler_weight: f64,
 }
 
 /// Detached statistics from a training step, for metrics/logging.
@@ -118,6 +124,22 @@ pub struct Masked<B: Backend> {
     pub mask: Tensor<B, 3>,
     /// `[batch]` sampled masking rate.
     pub t: Tensor<B, 1>,
+}
+
+fn loss_weights<B: Backend>(
+    entity_target: Tensor<B, 3, Int>,
+    mask: Tensor<B, 3>,
+    cfg: &DiffusionConfig,
+) -> Tensor<B, 3> {
+    let non_empty = entity_target.clone().greater_elem(0).float();
+    let assembler = entity_target.equal_elem(Entity::Assembler as i32).float();
+    let structure = non_empty
+        .mul_scalar(cfg.structure_weight - 1.0)
+        .add_scalar(1.0);
+    let machine = assembler
+        .mul_scalar(cfg.assembler_weight - 1.0)
+        .add_scalar(1.0);
+    structure.mul(machine).mul(mask)
 }
 
 /// Apply the forward (noising) process to a clean batch.
@@ -197,11 +219,7 @@ pub fn loss<B: Backend>(
         .equal_elem(Entity::Assembler as i32)
         .float();
     let assembler_mask = assembler.mul(mask.clone());
-    let weight = non_empty
-        .clone()
-        .mul_scalar(cfg.structure_weight - 1.0)
-        .add_scalar(1.0)
-        .mul(mask.clone()); // 0 on unmasked cells
+    let weight = loss_weights(entity_target, mask.clone(), cfg); // 0 on unmasked cells
     let w_sum = weight.clone().sum(); // total weight (scalar tensor)
     let n_masked = mask.clone().sum();
 
@@ -275,6 +293,30 @@ mod tests {
     use crate::backend::CpuBackend;
     use crate::factory_gen::{generate, Canvas, LessonKind};
     use crate::model::DenoiserConfig;
+
+    #[test]
+    fn assembler_anchors_get_dedicated_loss_weight() {
+        type B = CpuBackend;
+        let device = Default::default();
+        let entity = Tensor::<B, 1, Int>::from_ints(
+            [
+                Entity::Empty as i32,
+                Entity::TransportBelt as i32,
+                Entity::Assembler as i32,
+            ],
+            &device,
+        )
+        .reshape([1, 1, 3]);
+        let mask = Tensor::<B, 3>::ones([1, 1, 3], &device);
+        let cfg = DiffusionConfig::new();
+
+        let values: Vec<f32> = loss_weights(entity, mask, &cfg)
+            .to_data()
+            .convert::<f32>()
+            .into_vec()
+            .unwrap();
+        assert_eq!(values, vec![1.0, 8.0, 64.0]);
+    }
 
     #[test]
     fn masking_leaves_observed_cells_untouched() {
