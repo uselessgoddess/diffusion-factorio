@@ -30,6 +30,10 @@ pub enum LessonKind {
     MoveOneItemChaos,
     /// Source → inserter → assembler(recipe) → inserter → sink. Adds item.
     AssemblerLine,
+    /// Random source/sink tasks with a deterministically placed assembler and
+    /// two routed lines, but no obstacles. Bridges fixed machine templates and
+    /// obstacle-aware composition.
+    AssemblerOpen,
     /// The same craft, but nothing is stamped: obstacles, source, and sink form
     /// a random visible task; a deterministic solver then chooses the machine
     /// pose and *routes* the belts. The only machine lesson whose task space
@@ -62,6 +66,7 @@ impl LessonKind {
             LessonKind::MoveOneItem,
             LessonKind::MoveOneItemChaos,
             LessonKind::AssemblerLine,
+            LessonKind::AssemblerOpen,
             LessonKind::AssemblerChaos,
             LessonKind::DirectRecipe,
             LessonKind::UndergroundCross,
@@ -75,6 +80,7 @@ impl LessonKind {
             LessonKind::MoveOneItem => "MOVE_ONE_ITEM",
             LessonKind::MoveOneItemChaos => "MOVE_ONE_ITEM_CHAOS",
             LessonKind::AssemblerLine => "ASSEMBLER_LINE",
+            LessonKind::AssemblerOpen => "ASSEMBLER_OPEN",
             LessonKind::AssemblerChaos => "ASSEMBLER_CHAOS",
             LessonKind::DirectRecipe => "DIRECT_RECIPE",
             LessonKind::UndergroundCross => "UNDERGROUND_CROSS",
@@ -105,7 +111,7 @@ impl LessonKind {
             LessonKind::AssemblerLine => Canvas::new(LINE_W, LINE_H),
             // The machine and its two inserters need 5 across in the worst case;
             // the rest is room for the router to have somewhere to route.
-            LessonKind::AssemblerChaos => Canvas::square(7),
+            LessonKind::AssemblerOpen | LessonKind::AssemblerChaos => Canvas::square(7),
             LessonKind::DirectRecipe => Canvas::new(DIRECT_W, DIRECT_H),
             // One row: `S b d # u b K`.
             LessonKind::UndergroundCross => Canvas::new(7, 1),
@@ -297,6 +303,7 @@ pub fn generate(kind: LessonKind, canvas: Canvas, seed: u64) -> Option<Sample> {
             LessonKind::MoveOneItem => gen_move_one_item(canvas, &mut rng, false),
             LessonKind::MoveOneItemChaos => gen_move_one_item(canvas, &mut rng, true),
             LessonKind::AssemblerLine => gen_assembler_line(canvas, &mut rng),
+            LessonKind::AssemblerOpen => gen_assembler_open(canvas, &mut rng),
             LessonKind::AssemblerChaos => gen_assembler_chaos(canvas, &mut rng),
             LessonKind::DirectRecipe => gen_direct_recipe(canvas, &mut rng),
             LessonKind::UndergroundCross => gen_underground_cross(canvas, &mut rng),
@@ -744,7 +751,8 @@ fn gen_direct_recipe(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
 /// [`gen_move_one_item`] uses in chaos mode.
 const CHAOS_OBSTACLES: usize = 10;
 
-/// The same craft as [`gen_assembler_line`], with nothing stamped:
+/// The same craft as [`gen_assembler_line`], with nothing stamped. The open
+/// rung omits `#`; the chaos rung includes it:
 ///
 /// ```text
 ///   . # . . b b K       S  source        A  assembler (3x3, anchored)
@@ -756,7 +764,7 @@ const CHAOS_OBSTACLES: usize = 10;
 ///   . . b b b b .
 /// ```
 ///
-/// Why this family exists: `task_space` counts every other machine lesson at a
+/// Why these families exist: `task_space` counts every templated machine lesson at a
 /// handful of distinct layouts — [`LessonKind::AssemblerLine`] has **2**, one per
 /// recipe — because they place a fixed template at
 /// `rng.gen_range(0..=(size - W))` and vary nothing else. The rest of their
@@ -765,30 +773,52 @@ const CHAOS_OBSTACLES: usize = 10;
 /// it already generalizes over for free. A bigger board multiplies the offsets
 /// and not the layouts; see `docs/ROADMAP.md` bottleneck 0.
 ///
-/// [`LessonKind::MoveOneItemChaos`] is the family that does not have this
+/// [`LessonKind::MoveOneItemChaos`] is the routing family that does not have this
 /// problem (200,000 distinct layouts from 200,000 seeds, at every size), and the
 /// reason is that it does not stamp: obstacles go into the conditioning plane
 /// and the belts are derived by BFS *through* them, so the label is a function
-/// of a world the model can see. This applies that to the craft:
+/// of a world the model can see. The two routed assembler rungs apply that to
+/// the craft without demanding every kind of generalization at once:
 ///
-/// * obstacles are scattered first, and the router has to respect them;
 /// * source and sink land anywhere they fit;
 /// * the closest feasible machine footprint and its inserter faces are derived
 ///   deterministically from that visible task;
-/// * the belts are whatever BFS finds, so the answer depends on the obstacles
-///   rather than ignoring them.
+/// * `ASSEMBLER_OPEN` teaches those two routes on clear terrain;
+/// * `ASSEMBLER_CHAOS` then scatters obstacles first, and BFS must respect them.
 ///
 /// Placing obstacles that the answer *ignores* would be worse than useless: it
 /// inflates every distinctness count while teaching nothing. What makes them
 /// count is that they are in the path.
+fn gen_assembler_open(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
+    gen_routed_assembler(canvas, rng, LessonKind::AssemblerOpen, false)
+}
+
 fn gen_assembler_chaos(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
-    if !LessonKind::AssemblerChaos.fits(canvas) {
+    gen_routed_assembler(canvas, rng, LessonKind::AssemblerChaos, true)
+}
+
+/// Shared task-first solver for the two arbitrary-placement machine lessons.
+/// `ASSEMBLER_OPEN` holds terrain complexity at zero; `ASSEMBLER_CHAOS` adds it
+/// after placement and two-route composition have a dedicated training family.
+fn gen_routed_assembler(
+    canvas: Canvas,
+    rng: &mut ChaCha8Rng,
+    kind: LessonKind,
+    with_obstacles: bool,
+) -> Option<Sample> {
+    debug_assert!(matches!(
+        kind,
+        LessonKind::AssemblerOpen | LessonKind::AssemblerChaos
+    ));
+    if !kind.fits(canvas) {
         return None;
     }
     let mut grid = canvas.grid();
-    for _ in 0..(canvas.area() / CHAOS_OBSTACLES).max(1) {
-        let (x, y) = random_cell(canvas, rng);
-        grid.set_obstacle(x, y, true);
+    if with_obstacles {
+        for _ in 0..(canvas.area() / CHAOS_OBSTACLES).max(1) {
+            let (x, y) = random_cell(canvas, rng);
+            grid.set_obstacle(x, y, true);
+        }
     }
 
     let recipe = *Item::single_input_craftable().choose(rng).unwrap();
@@ -959,7 +989,7 @@ fn gen_assembler_chaos(canvas: Canvas, rng: &mut ChaCha8Rng) -> Option<Sample> {
             candidate.idx(ax, ay),
         ];
         return Some(Sample {
-            kind: LessonKind::AssemblerChaos,
+            kind,
             solution: candidate,
             protected,
             removable,
@@ -1940,6 +1970,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The model should not have to jump from two translated assembler stamps
+    /// straight to arbitrary machine placement, two routed belt runs *and*
+    /// obstacle avoidance. A no-obstacle family with varied one-machine answers
+    /// is the missing curriculum rung: it teaches placement and connection
+    /// before the terrain constraint is added.
+    #[test]
+    fn curriculum_bridges_templates_before_obstacle_assembler_routing() {
+        let answer_shape = |s: &Sample| {
+            let cells: Vec<(usize, usize, Cell)> = s
+                .solution
+                .cells
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    !c.is_empty() && !matches!(c.entity, Entity::Source | Entity::Sink)
+                })
+                .map(|(i, &c)| (i % s.solution.width, i / s.solution.width, c))
+                .collect();
+            let min_x = cells.iter().map(|&(x, _, _)| x).min().unwrap();
+            let min_y = cells.iter().map(|&(_, y, _)| y).min().unwrap();
+            let mut keys: Vec<String> = cells
+                .iter()
+                .map(|&(x, y, c)| {
+                    format!(
+                        "{},{}:{}:{}:{}:{}",
+                        x - min_x,
+                        y - min_y,
+                        c.entity as u8,
+                        c.direction as u8,
+                        c.item as u8,
+                        c.misc as u8
+                    )
+                })
+                .collect();
+            keys.sort();
+            keys.join(";")
+        };
+
+        let mut best = ("none", 0usize);
+        for &kind in LessonKind::all() {
+            let shapes: HashSet<String> = (0..200u64)
+                .filter_map(|seed| generate(kind, Canvas::square(11), seed))
+                .filter(|s| !s.solution.obstacle.iter().any(|&blocked| blocked))
+                .filter(|s| {
+                    s.solution
+                        .cells
+                        .iter()
+                        .filter(|c| c.entity == Entity::Assembler)
+                        .count()
+                        == 1
+                })
+                .map(|s| answer_shape(&s))
+                .collect();
+            if shapes.len() > best.1 {
+                best = (kind.name(), shapes.len());
+            }
+        }
+
+        assert!(
+            best.1 > 100,
+            "no varied obstacle-free assembler bridge: the best family is {} with only {} answer shapes",
+            best.0,
+            best.1
+        );
     }
 
     /// The measurement that justifies this whole family, small enough to run in

@@ -102,6 +102,23 @@ checks the canonical machine and positive throughput across every supported
 canvas shape, while 200 seeds still produce more than 150 task-conditioned
 answers.
 
+That correction made the target learnable, but the controlled 3,000-step rerun
+still produced 0/14 functional `ASSEMBLER_CHAOS` scratch factories. The model's
+entity match improved while connected behavior did not. The remaining dataset
+jump was measurable without another architecture guess: at size 11,
+`ASSEMBLER_LINE` exposes only **2** translation-independent answers, then
+`ASSEMBLER_CHAOS` jumps directly to **73,297** answers across 200,000 seeds while
+simultaneously adding arbitrary machine placement, two inserter faces, two belt
+routes, and obstacle avoidance.
+
+`ASSEMBLER_OPEN` is the missing curriculum rung. It uses the identical
+task-first deterministic solver and source/sink distribution but holds terrain
+complexity at zero. The same `task_space` census measures **4,900 tasks, 784
+translation-independent shapes, and 672 answer shapes**. Training therefore
+sees arbitrary placement and connected two-route composition before adding
+obstacles, while `ASSEMBLER_CHAOS` remains a separate hard validation family;
+the acceptance metric has not been made easier.
+
 ## Architecture: what to borrow, and what not to
 
 The uploaded Quark model is a compact causal language Transformer (RoPE,
@@ -435,7 +452,7 @@ Pinned by `factory_gen::tests::padding_squares_would_drop_the_two_lessons_that_c
 and `train::tests::the_default_curriculum_teaches_every_family_on_the_inference_canvas`.
 
 **What this does not settle.** The coverage argument proves a square curriculum
-*cannot show* two of nine families on 13×9. Whether the shape-mixed pool makes
+*cannot show* two of ten families on 13×9. Whether the shape-mixed pool makes
 the model *build better factories* there is a question about weights, and only a
 run answers it. The `curriculum` job in `.github/workflows/ci.yml`
 (`workflow_dispatch`) trains both arms identically apart from the curriculum and

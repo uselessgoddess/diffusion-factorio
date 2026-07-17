@@ -443,6 +443,12 @@ first; a deterministic solver then derives the machine pose and routes. An older
 197,228 / 200,000 count included hidden random machine choices, which were label
 noise rather than inferable diversity.
 
+The same census also exposed a curriculum discontinuity: there was no varied
+one-machine family between `ASSEMBLER_LINE`'s two answers and obstacle routing.
+`ASSEMBLER_OPEN` now reuses the deterministic solver without obstacles (4,900
+tasks and 672 answer shapes at size 11), isolating machine placement plus two
+connected routes before `ASSEMBLER_CHAOS` adds terrain.
+
 **The recipe is known and it is not RL: randomize the world, derive the label by
 search rather than stamping it.** `UNDERGROUND_CROSS`, `ASSEMBLER_BANK` and
 `CIRCUIT_LINE` are still templates and want the same treatment. The bank is the

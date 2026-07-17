@@ -153,6 +153,7 @@ the board size — `ASSEMBLER_LINE` is `2(S−6)(S−2)`, `CIRCUIT_LINE` is
                             factories   shapes    of which        answers
 ASSEMBLER_LINE      S=11           90        2   45× translation        2
                     S=19          442        2  221× translation        2
+ASSEMBLER_OPEN      S=11         4900      784    6× translation      672
 ASSEMBLER_BANK      S=11           90        6   15× translation        6
                     S=19          858        6  143× translation        6
 CIRCUIT_LINE        S=11           21        3    7× translation        3
@@ -199,6 +200,13 @@ it. Give them the chaos treatment; see step 4.**
 **Step 4 has since done exactly that for the assembler lesson.** Under the
 production source/sink-only conditioning contract, 200 seeds produce more than
 150 task-conditioned `ASSEMBLER_CHAOS` answers against `ASSEMBLER_LINE`'s 2.
+
+The first deterministic-target training run showed why diversity alone is not a
+curriculum: connected scratch behavior remained 0/14 when the task jumped from
+those two stamps directly to arbitrary placement, two routes, and obstacles.
+`ASSEMBLER_OPEN` now holds obstacles at zero while reusing the same task-first
+solver. At size 11 it contributes 4,900 tasks and 672 answer shapes, then leaves
+the original `ASSEMBLER_CHAOS` distribution intact as the hard next rung.
 
 A caution learned the hard way here: `Sample::blank` observes every cell it does
 not blank. The old production path therefore left protected answer cells visible
@@ -370,7 +378,7 @@ and neither was visible in the ASCII render:
 Both were found with `experiments/why_zero.rs`, which hunts factories that are
 functional but score zero and dumps the cells rather than the glyphs — the render
 draws an inserter as `i` whichever way the hand swings, which is precisely the bug.
-All nine families now report 0 of 200, `DIRECT_RECIPE` and `SHARED_LINE` included. **`UNDERGROUND_CROSS`, `ASSEMBLER_BANK`
+All nine families in that run reported 0 of 200, `DIRECT_RECIPE` and `SHARED_LINE` included. **`UNDERGROUND_CROSS`, `ASSEMBLER_BANK`
 and `CIRCUIT_LINE` are still templates** and want the same treatment; the bank is
 the interesting one, since it is the only family that is honestly ambiguous and
 that property has to survive the randomization.
