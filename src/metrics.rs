@@ -14,7 +14,7 @@
 
 use crate::sim::item_reaches_sink;
 use crate::throughput;
-use crate::world::{Channel, Grid, N_CHANNELS};
+use crate::world::{Channel, Entity, Grid, N_CHANNELS};
 use serde::{Deserialize, Serialize};
 
 const CHANNELS: [Channel; N_CHANNELS] = [
@@ -32,6 +32,25 @@ pub struct ReconReport {
     pub masked_cells: usize,
     /// Per-channel correct counts on masked cells.
     pub channel_correct: [usize; N_CHANNELS],
+    /// Masked cells whose target contains any non-empty entity.
+    pub placement_targets: usize,
+    /// Correct entity class on [`Self::placement_targets`].
+    pub placement_correct: usize,
+    /// Masked assembler anchors and correctly reconstructed anchors.
+    pub assembler_targets: usize,
+    pub assembler_correct: usize,
+    /// Assembler anchors where both the machine and its recipe are correct.
+    pub recipe_correct: usize,
+    /// Masked inserters and the subset reconstructed with the right entity and
+    /// direction. A misplaced/facing-wrong inserter breaks a crafting line even
+    /// when almost every empty grid cell is correct.
+    pub inserter_targets: usize,
+    pub inserter_correct: usize,
+    pub inserter_direction_correct: usize,
+    /// The same decomposition for ordinary transport belts.
+    pub belt_targets: usize,
+    pub belt_correct: usize,
+    pub belt_direction_correct: usize,
     /// Factories whose masked cells were reconstructed exactly (all channels).
     pub exact: usize,
     /// Reconstructions that are channel-consistent (well-formed).
@@ -71,6 +90,27 @@ impl ReconReport {
     }
     pub fn consistent_rate(&self) -> f64 {
         rate(self.consistent, self.n_factories)
+    }
+    pub fn placement_recall(&self) -> f64 {
+        rate(self.placement_correct, self.placement_targets)
+    }
+    pub fn assembler_recall(&self) -> f64 {
+        rate(self.assembler_correct, self.assembler_targets)
+    }
+    pub fn recipe_accuracy(&self) -> f64 {
+        rate(self.recipe_correct, self.assembler_targets)
+    }
+    pub fn inserter_recall(&self) -> f64 {
+        rate(self.inserter_correct, self.inserter_targets)
+    }
+    pub fn inserter_direction_accuracy(&self) -> f64 {
+        rate(self.inserter_direction_correct, self.inserter_targets)
+    }
+    pub fn belt_recall(&self) -> f64 {
+        rate(self.belt_correct, self.belt_targets)
+    }
+    pub fn belt_direction_accuracy(&self) -> f64 {
+        rate(self.belt_direction_correct, self.belt_targets)
     }
     /// Mean items/second delivered per reconstructed factory.
     pub fn throughput_mean(&self) -> f64 {
@@ -123,6 +163,31 @@ pub fn reconstruction_report(
             }
             r.masked_cells += 1;
             let (oc, rc) = (orig.cells[i], recon.cells[i]);
+            let entity_correct = oc.entity == rc.entity;
+            if oc.entity != Entity::Empty {
+                r.placement_targets += 1;
+                r.placement_correct += usize::from(entity_correct);
+            }
+            match oc.entity {
+                Entity::Assembler => {
+                    r.assembler_targets += 1;
+                    r.assembler_correct += usize::from(entity_correct);
+                    r.recipe_correct += usize::from(entity_correct && oc.item == rc.item);
+                }
+                Entity::Inserter => {
+                    r.inserter_targets += 1;
+                    r.inserter_correct += usize::from(entity_correct);
+                    r.inserter_direction_correct +=
+                        usize::from(entity_correct && oc.direction == rc.direction);
+                }
+                Entity::TransportBelt => {
+                    r.belt_targets += 1;
+                    r.belt_correct += usize::from(entity_correct);
+                    r.belt_direction_correct +=
+                        usize::from(entity_correct && oc.direction == rc.direction);
+                }
+                _ => {}
+            }
             let mut cell_correct = true;
             for (ci, ch) in CHANNELS.iter().enumerate() {
                 if oc.channel_id(*ch) == rc.channel_id(*ch) {
@@ -168,7 +233,7 @@ impl std::fmt::Display for ReconReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "n={} | exact={:.3} functional={:.3} (orig_fn={}) consistent={:.3} | thput={:.3}/s ratio={:.3} beat={} | acc[entity={:.3} dir={:.3} item={:.3} misc={:.3}]",
+            "n={} | exact={:.3} functional={:.3} (orig_fn={}) consistent={:.3} | thput={:.3}/s ratio={:.3} beat={} | parts[place={:.3} asm={:.3} recipe={:.3} inserter={:.3}/{:.3} belt={:.3}/{:.3}] | acc[entity={:.3} dir={:.3} item={:.3} misc={:.3}]",
             self.n_factories,
             self.exact_rate(),
             self.functional_rate(),
@@ -177,10 +242,81 @@ impl std::fmt::Display for ReconReport {
             self.throughput_mean(),
             self.throughput_ratio_mean(),
             self.beat_original,
+            self.placement_recall(),
+            self.assembler_recall(),
+            self.recipe_accuracy(),
+            self.inserter_recall(),
+            self.inserter_direction_accuracy(),
+            self.belt_recall(),
+            self.belt_direction_accuracy(),
             self.channel_acc(0),
             self.channel_acc(1),
             self.channel_acc(2),
             self.channel_acc(3),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::{Cell, Direction, Entity, Item};
+
+    #[test]
+    fn component_metrics_expose_machine_and_route_failures_hidden_by_empty_cells() {
+        let mut original = Grid::new(7, 5);
+        original.set(0, 0, Cell::belt(Direction::East));
+        original.set(
+            1,
+            0,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        original.set(
+            2,
+            0,
+            Cell {
+                entity: Entity::Assembler,
+                direction: Direction::East,
+                item: Item::IronGear,
+                ..Default::default()
+            },
+        );
+
+        let mut reconstructed = Grid::new(7, 5);
+        reconstructed.set(0, 0, Cell::belt(Direction::North));
+        reconstructed.set(
+            1,
+            0,
+            Cell {
+                entity: Entity::Inserter,
+                direction: Direction::East,
+                ..Default::default()
+            },
+        );
+        reconstructed.set(
+            2,
+            0,
+            Cell {
+                entity: Entity::Assembler,
+                direction: Direction::East,
+                item: Item::CopperCable,
+                ..Default::default()
+            },
+        );
+
+        let report = reconstruction_report(&[original], &[reconstructed], &[vec![false; 7 * 5]]);
+
+        assert_eq!(report.placement_targets, 3);
+        assert_eq!(report.placement_recall(), 1.0);
+        assert_eq!(report.assembler_recall(), 1.0);
+        assert_eq!(report.recipe_accuracy(), 0.0);
+        assert_eq!(report.inserter_recall(), 1.0);
+        assert_eq!(report.inserter_direction_accuracy(), 1.0);
+        assert_eq!(report.belt_recall(), 1.0);
+        assert_eq!(report.belt_direction_accuracy(), 0.0);
     }
 }

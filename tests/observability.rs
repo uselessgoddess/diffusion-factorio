@@ -64,6 +64,7 @@ fn example_logs() -> Vec<TrainLog> {
                 throughput_ratio: 16.0,
                 gradeable: 64,
                 beat_original: 1,
+                ..Default::default()
             }),
             val_by_lesson: Default::default(),
             // From scratch the whole factory is masked, so far more cells are
@@ -81,6 +82,7 @@ fn example_logs() -> Vec<TrainLog> {
                 throughput_ratio: 3.0,
                 gradeable: 64,
                 beat_original: 0,
+                ..Default::default()
             }),
             val_scratch_by_lesson: BTreeMap::from([(
                 "move_one_item".to_owned(),
@@ -97,6 +99,7 @@ fn example_logs() -> Vec<TrainLog> {
                     throughput_ratio: 2.4,
                     gradeable: 16,
                     beat_original: 0,
+                    ..Default::default()
                 },
             )]),
         },
@@ -118,6 +121,8 @@ fn metrics_jsonl_is_structured_and_keeps_validation() {
     assert_eq!(rows[1]["samples_seen"], 6400);
     assert_eq!(rows[1]["val"]["functional_rate"], 21.0 / 64.0);
     assert_eq!(rows[1]["val"]["entity_acc"], 0.9);
+    assert!(rows[1]["val"].get("assembler_recall").is_some());
+    assert!(rows[1]["val"].get("belt_direction_accuracy").is_some());
     assert_eq!(rows[1]["assembler_recall"], 0.73);
     assert_eq!(rows[1]["recipe_accuracy"], 0.68);
     fs::remove_file(path).ok();
