@@ -24,8 +24,7 @@ struct Args {
     /// Train on one square canvas of this side, instead of the shape pool.
     ///
     /// This is the old square-only curriculum, kept because it is the control
-    /// the shape-mixed default has to beat — the `curriculum` CI job trains both
-    /// and scores them on the issue's 13x9. It is not a good way to train:
+    /// the shape-mixed default has to beat. It is not a good way to train:
     /// see `docs/GENERALIZATION.md` cause 5.
     #[arg(long)]
     size: Option<usize>,

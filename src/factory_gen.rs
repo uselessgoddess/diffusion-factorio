@@ -36,8 +36,8 @@ pub enum LessonKind {
     AssemblerOpen,
     /// The same craft, but nothing is stamped: obstacles, source, and sink form
     /// a random visible task; a deterministic solver then chooses the machine
-    /// pose and *routes* the belts. The only machine lesson whose task space
-    /// does not run out — see [`gen_assembler_chaos`].
+    /// pose and *routes* the belts. The hard obstacle-aware machine lesson whose
+    /// task space does not run out — see [`gen_assembler_chaos`].
     AssemblerChaos,
     /// Ingredient sources feed one assembler directly. Covers every recipe,
     /// including iron plate + copper cable → green circuit without an

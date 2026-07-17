@@ -404,12 +404,12 @@ checkpoint:
 
 ```
       canvas  padded  native  lost to padding
-        11x11   9/9     9/9    -                          trained shape
-         13x9   7/9     9/9    CIRCUIT_LINE, SHARED_LINE  the issue's shape
-         9x13   7/9     7/9    -                          the same, turned
-          9x9   7/9     7/9    -                          pool floor
-        15x15   9/9     9/9    -                          pool ceiling
-         15x9   7/9     9/9    CIRCUIT_LINE, SHARED_LINE  widest gap
+        11x11  10/10   10/10    -                          trained shape
+         13x9   8/10   10/10    CIRCUIT_LINE, SHARED_LINE  the issue's shape
+         9x13   8/10    8/10    -                          the same, turned
+          9x9   8/10    8/10    -                          pool floor
+        15x15  10/10   10/10    -                          pool ceiling
+         15x9   8/10   10/10    CIRCUIT_LINE, SHARED_LINE  widest gap
 ```
 
 **Native generation, for three reasons, one of them decisive.**
@@ -460,7 +460,7 @@ scores each with `experiments/grid_shape.rs`; read the 13×9 row.
 
 **The known limit, deliberately not fixed here.** Every family is templated in one
 orientation, so an 11-wide lesson does not fit a 9-wide canvas however tall it is —
-which is why native scores 7/9 on 9×13 as well, and the honest reading of that row
+which is why native scores 8/10 on 9×13 as well, and the honest reading of that row
 is that native does not help there. Rotating the templates would buy it back and is
 the obvious next lesson-side move. It is not what 13×9 needs, and padding does not
 buy it either.

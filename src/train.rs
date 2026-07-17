@@ -452,6 +452,20 @@ fn build_validation_set(cfg: &TrainConfig) -> ValidationSet {
     }
 }
 
+/// Families actually represented in a validation corpus.
+///
+/// This differs from the canvas-wide curriculum during narrow A/B controls:
+/// the canvas can fit `ASSEMBLER_OPEN` even when that arm deliberately excludes
+/// it. Reporting an empty synthetic row for the excluded family obscures what
+/// the arm really evaluated.
+fn validation_kinds(validation: &ValidationSet) -> Vec<LessonKind> {
+    LessonKind::all()
+        .iter()
+        .copied()
+        .filter(|kind| validation.kinds.contains(kind))
+        .collect()
+}
+
 /// One validation pass in both modes.
 struct Validation {
     /// Fill the gaps in a given scaffold (the historical metric).
@@ -504,7 +518,7 @@ fn validate<B: AutodiffBackend>(
 
         let aggregate = reconstruction_report(&validation.originals, &recon, observed);
         let mut by_lesson = BTreeMap::new();
-        for &kind in curriculum_kinds(&cfg.canvases).iter() {
+        for kind in validation_kinds(validation) {
             let indexes: Vec<usize> = validation
                 .kinds
                 .iter()
@@ -709,5 +723,14 @@ mod tests {
         assert!(control
             .iter()
             .all(|kind| production.contains(kind) && *kind != LessonKind::AssemblerOpen));
+
+        let control_cfg = TrainConfig {
+            canvases: vec![canvas],
+            val_batch: LessonKind::all().len() * 2,
+            include_assembler_open: false,
+            ..Default::default()
+        };
+        let validation = build_validation_set(&control_cfg);
+        assert_eq!(validation_kinds(&validation), control);
     }
 }

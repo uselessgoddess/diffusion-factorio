@@ -92,3 +92,6 @@ of the canvas is correctly empty in both cases.
   compute cost.
 - `--val-batch`: size of the fixed held-out corpus. Increase it to reduce
   validation noise before comparing close checkpoints.
+- `--no-assembler-open`: local/GPU control arm that removes only the
+  obstacle-free assembler bridge. Keep the same seed and all other flags when
+  comparing it with the production curriculum.
